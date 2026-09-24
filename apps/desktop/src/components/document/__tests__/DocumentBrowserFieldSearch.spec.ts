@@ -280,7 +280,22 @@ async function flushUi() {
   for (let index = 0; index < 4; index++) {
     await Promise.resolve();
     await nextTick();
+    // The mount chain (ensureConnected → load → render) spans more than a fixed
+    // number of microtask rounds once a real timer is in it, and DocumentBrowser
+    // renders from state those steps produce. Yielding to the macrotask queue
+    // lets each of them settle instead of leaving the component half-loaded.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
+}
+
+// flushUi only drains microtasks; popovers that mount through a timer need
+// polling or the query below races the render and returns null under load.
+async function waitForElement<T extends Element>(selector: string): Promise<T> {
+  return vi.waitFor(() => {
+    const element = document.body.querySelector<T>(selector);
+    if (!element) throw new Error(`element not rendered yet: ${selector}`);
+    return element;
+  });
 }
 
 function buttonWithTitle(title: string): HTMLButtonElement {
@@ -1082,7 +1097,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();
-    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    const valueInput = await waitForElement<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
     const callsBeforeEnter = backend.documentFindDocuments.mock.calls.length;
     valueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await flushUi();
@@ -1090,7 +1105,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
 
     root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
     await flushUi();
-    const reopenedValueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
+    const reopenedValueInput = await waitForElement<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
     reopenedValueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
     await flushUi();
     expect(document.body.querySelectorAll('input[placeholder="grid.filterBuilderValue"]')).toHaveLength(2);

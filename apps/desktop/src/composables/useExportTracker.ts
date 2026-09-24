@@ -1,8 +1,9 @@
 import { reactive, computed } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
+import { uuid } from "@/lib/common/utils";
 
-export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution";
+export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
 export type DatabaseExportSource = "manual" | "scheduled";
 
@@ -47,6 +48,9 @@ export interface ExportTask {
   failureCount?: number;
   affectedRows?: number;
   elapsedMs?: number;
+  bytesRead?: number;
+  totalBytes?: number;
+  sqlFilePhase?: api.SqlFileProgress["phase"];
   startedAt?: number;
   finishedAt?: number;
   statementSummary?: string;
@@ -70,7 +74,36 @@ export interface ExportTask {
   multiDbSkippedCount?: number;
   multiDbNotExecutedCount?: number;
   currentTarget?: { connectionId: string; catalog?: string; database: string; schema?: string };
+  comparePhase?: string;
+  compareCurrent?: number;
+  compareTotal?: number;
+  compareCurrentObject?: string;
+  compareResultCount?: number;
+  compareSameCount?: number;
+  compareDifferentCount?: number;
+  compareFailedCount?: number;
+  compareAddedCount?: number;
+  compareRemovedCount?: number;
+  compareModifiedCount?: number;
+  canCancel?: boolean;
   onOpen?: () => void;
+  onRemove?: () => void;
+}
+
+export interface CompareTaskProgress {
+  status: Extract<BackgroundTaskStatus, "Running" | "Done" | "Error" | "Cancelled">;
+  comparePhase?: string;
+  compareCurrent?: number;
+  compareTotal?: number;
+  compareCurrentObject?: string;
+  compareResultCount?: number;
+  compareSameCount?: number;
+  compareDifferentCount?: number;
+  compareFailedCount?: number;
+  compareAddedCount?: number;
+  compareRemovedCount?: number;
+  compareModifiedCount?: number;
+  errorMessage?: string | null;
 }
 
 export interface MultiDbExecutionTaskProgress {
@@ -358,20 +391,8 @@ export function useExportTracker() {
 
   const hasActive = computed(() => activeCount.value > 0);
 
-  function generateUUID() {
-    if (typeof crypto !== "undefined" && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    let buffer = new Uint8Array(16);
-    crypto.getRandomValues(buffer);
-    buffer[6] = (buffer[6] & 0x0f) | 0x40;
-    return Array.from(buffer, (b) => b.toString(16).padStart(2, "0"))
-      .join("")
-      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
-  }
-
   function addTask(tableName: string, format: string, filePath: string, exportId?: string): ExportTask {
-    const id = exportId ?? generateUUID();
+    const id = exportId ?? uuid();
     const task = reactive<ExportTask>({
       exportId: id,
       kind: "table-export",
@@ -456,6 +477,37 @@ export function useExportTracker() {
     });
     taskMap.set(transferId, task);
     return task;
+  }
+
+  function addCompareTask(kind: "schema-diff" | "data-compare", sessionId: string, label: string, onOpen?: () => void, onRemove?: () => void): ExportTask {
+    const task = reactive<ExportTask>({
+      exportId: sessionId,
+      kind,
+      tableName: label,
+      format: "compare",
+      filePath: "",
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      compareCurrent: 0,
+      compareTotal: 0,
+      compareCurrentObject: "",
+      canCancel: false,
+      onOpen,
+      onRemove,
+      startedAt: Date.now(),
+    });
+    taskMap.set(sessionId, task);
+    return task;
+  }
+
+  function addSchemaDiffTask(sessionId: string, label: string, onOpen?: () => void, onRemove?: () => void): ExportTask {
+    return addCompareTask("schema-diff", sessionId, label, onOpen, onRemove);
+  }
+
+  function addDataCompareTask(sessionId: string, label: string, onOpen?: () => void, onRemove?: () => void): ExportTask {
+    return addCompareTask("data-compare", sessionId, label, onOpen, onRemove);
   }
 
   function addMultiDbExecutionTask(batchId: string, label: string, sourceTabId: string, onOpen?: () => void): ExportTask {
@@ -612,9 +664,12 @@ export function useExportTracker() {
     task.failureCount = progress.failureCount;
     task.affectedRows = progress.affectedRows;
     task.elapsedMs = progress.elapsedMs;
+    task.bytesRead = progress.bytesRead ?? task.bytesRead;
+    task.totalBytes = progress.totalBytes ?? task.totalBytes;
+    task.sqlFilePhase = progress.phase ?? task.sqlFilePhase;
     task.statementSummary = progress.statementSummary;
     task.rowsExported = progress.successCount + progress.failureCount;
-    task.totalRows = Math.max(progress.statementIndex, progress.successCount + progress.failureCount) || null;
+    task.totalRows = null;
   }
 
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {
@@ -642,7 +697,36 @@ export function useExportTracker() {
     task.totalRows = progress.totalRows ?? task.totalRows;
   }
 
+  function updateCompareTask(sessionId: string, progress: CompareTaskProgress): void {
+    const task = taskMap.get(sessionId);
+    if (!task || (task.kind !== "schema-diff" && task.kind !== "data-compare")) return;
+    task.status = progress.status;
+    task.comparePhase = progress.comparePhase;
+    task.compareCurrent = progress.compareCurrent;
+    task.compareTotal = progress.compareTotal;
+    task.compareCurrentObject = progress.compareCurrentObject;
+    task.compareResultCount = progress.compareResultCount;
+    task.compareSameCount = progress.compareSameCount;
+    task.compareDifferentCount = progress.compareDifferentCount;
+    task.compareFailedCount = progress.compareFailedCount;
+    task.compareAddedCount = progress.compareAddedCount;
+    task.compareRemovedCount = progress.compareRemovedCount;
+    task.compareModifiedCount = progress.compareModifiedCount;
+    task.errorMessage = progress.errorMessage ?? null;
+    if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
+  }
+
+  function cleanupFinishedTask(task: ExportTask): void {
+    try {
+      task.onRemove?.();
+    } catch {
+      // cleanup hooks must not prevent the task from being removed
+    }
+  }
+
   function removeTask(exportId: string) {
+    const task = taskMap.get(exportId);
+    if (task && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled")) cleanupFinishedTask(task);
     taskMap.delete(exportId);
     taskCancelHandlers.delete(exportId);
     transferFailureStates.delete(exportId);
@@ -652,6 +736,7 @@ export function useExportTracker() {
   function clearFinished() {
     for (const [id, task] of taskMap) {
       if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") {
+        cleanupFinishedTask(task);
         taskMap.delete(id);
         taskCancelHandlers.delete(id);
         transferFailureStates.delete(id);
@@ -670,6 +755,7 @@ export function useExportTracker() {
 
   async function cancelTask(exportId: string) {
     const task = taskMap.get(exportId);
+    if (task?.canCancel === false) return;
     try {
       const customHandler = taskCancelHandlers.get(exportId);
       if (customHandler) {
@@ -696,6 +782,8 @@ export function useExportTracker() {
     addDatabaseExportTask,
     addSqlFileTask,
     addDataTransferTask,
+    addSchemaDiffTask,
+    addDataCompareTask,
     addMultiDbExecutionTask,
     updateMultiDbExecutionTask,
     startDataTransferTask,
@@ -705,6 +793,7 @@ export function useExportTracker() {
     restoreDatabaseExportTaskRunning,
     updateSqlFileTask,
     updateDataTransferTask,
+    updateCompareTask,
     registerTaskCancelHandler,
     unregisterTaskCancelHandler,
     removeTask,

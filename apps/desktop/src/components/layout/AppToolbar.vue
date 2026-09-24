@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, PlugZap, FileDown, FolderTree, Pin, PinOff } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -11,6 +11,9 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import { setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { usePluginToolbarCommands, type PluginToolbarCommandEntry } from "@/lib/plugins/pluginCommandRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
@@ -27,6 +30,7 @@ const GithubIcon = {
 const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
+  showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
   /** Runs awaiting a write confirmation; the badge turns amber to outrank the
@@ -37,8 +41,10 @@ const props = defineProps<{
   sqlLibrarySaveFeedbackId: number;
   showSqlFilePanel: boolean;
   showDriverStore: boolean;
+  showPluginCenter: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
+  updateVersion?: string;
   hasUpdateAvailable: boolean;
   isDownloadingUpdate: boolean;
   downloadProgress: number | null;
@@ -47,10 +53,12 @@ const props = defineProps<{
   agentDriverUpdateCount: number;
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
+  canNewQuery: boolean;
   hasSqlFileConnections: boolean;
 }>();
 
 const emit = defineEmits<{
+  "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
   "set-theme-mode": [mode: AppThemeMode];
@@ -61,6 +69,7 @@ const emit = defineEmits<{
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
+  "open-plugin-center": [];
   "check-updates": [];
   "open-transfer": [];
   "open-sql-file": [];
@@ -70,18 +79,43 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+
+// PR-A4 appToolbar surface (HOST_PLUGIN_UI_SPEC §5.1): plugin commands render as icons
+// surface (next to Settings/AI); clicking runs the command (presentation: panel -> the global bottom dock),
+// clicking again collapses an open dock command.
+const { entries: pluginCommandEntries, open: openPluginCommand } = usePluginToolbarCommands();
+const { entries: pluginDockEntries, visible: dockVisible } = usePluginBottomDock();
+// The toolbar icon toggles panel visibility (panel hide keeps the webviews
+// mounted, so sessions and height survive); with a hidden-but-populated dock
+// the first click just restores it, and only an empty dock runs the command
+// (otherwise "getting the panel back" would keep spawning new terminals).
+function togglePluginCommand(entry: PluginToolbarCommandEntry) {
+  if (dockVisible.value) {
+    setDockVisible(false);
+    return;
+  }
+  if (pluginDockEntries.value.length) {
+    setDockVisible(true);
+    return;
+  }
+  const result = openPluginCommand(entry);
+  if (result.error) toast(result.error, 5000);
+}
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
-const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
-const checkingUpdates = computed(() => props.checkingUpdates);
+const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
+const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+// The always-on-top control is opt-in (外观 → 工具栏): the right side of the
+// toolbar is the most crowded strip in the app. It stays visible while the
+// window is actually pinned even with the setting off, so turning the setting
+// off can never leave the user with a pinned window and no way to unpin it.
+const showAlwaysOnTopButton = computed(() => isDesktop && (toolbarItems.value.alwaysOnTop || isAlwaysOnTop.value));
 const updateTooltip = computed(() => {
-  if (props.isDownloadingUpdate) return t("updates.downloading", { progress: props.downloadProgress ?? 0 });
-  if (props.updateReady) return t("updates.restartRequiredTooltip");
-  if (props.updateReadyToInstall) return t("updates.updateReadyTooltip");
+  if (props.hasUpdateAvailable && props.updateReady) return t("updates.restartRequiredTooltip");
+  if (props.hasUpdateAvailable && props.updateReadyToInstall) return t("updates.downloadedReady", { version: props.updateVersion ?? "" });
   return t("updates.check");
 });
-// ToolbarUpdateIcon takes a 0..1 fraction, with null meaning the download size is unknown.
-const updateDownloadProgress = computed(() => (props.downloadProgress == null ? null : Math.min(1, Math.max(0, props.downloadProgress / 100))));
+
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
 const SQL_LIBRARY_CHECK_PATH = "M9 9.5 L9 9.5 L11 11.5 L15 7.5 L15 7.5";
@@ -191,13 +225,13 @@ const collapsibleRightItemDefs = computed(() => {
     disabled: boolean;
   }
   const items: ItemDef[] = [];
-  if (toolbarItems.value.checkUpdates) {
+  if (showToolbarUpdateEntry.value) {
     items.push({
       key: "checkUpdates",
       label: t("updates.check"),
       icon: CloudDownload,
       action: () => emit("check-updates"),
-      disabled: checkingUpdates.value,
+      disabled: false,
     });
   }
   items.push({
@@ -380,6 +414,11 @@ function handleWindowResize() {
 
 watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
 watch(
+  () => props.showSidebarExpand,
+  () => scheduleToolbarLayout(),
+  { flush: "post" },
+);
+watch(
   () => settingsStore.editorSettings.uiScale,
   () => {
     measuredTrafficLightInset.value = null;
@@ -432,6 +471,9 @@ const moreItems = computed(() => {
       action: () => emit("open-driver-store"),
       disabled: false,
     });
+  }
+  if (!toolbarItems.value.pluginCenter) {
+    items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
 
   // "More" menu items (individually toggleable)
@@ -499,6 +541,9 @@ const collapsedItems = computed(() => {
       disabled: false,
     });
   }
+  if (toolbarItems.value.pluginCenter) {
+    items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
+  }
   // Always include moreItems (may contain hidden left-side items + overflowed right items)
   if (moreItems.value.length > 0) {
     items.push(...moreItems.value);
@@ -534,6 +579,14 @@ const toolbarStyle = computed(() => {
 
 <template>
   <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
+    <Tooltip v-if="showSidebarExpand">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('sidebar.expand')" @click="emit('expand-sidebar')">
+          <ChevronsRight class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("sidebar.expand") }}</TooltipContent>
+    </Tooltip>
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <span class="inline-flex items-center gap-1">
         <DatabaseZap class="h-3.5 w-3.5" />
@@ -541,7 +594,7 @@ const toolbarStyle = computed(() => {
       </span>
     </Button>
 
-    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')" :disabled="!hasConnections">
+    <Button v-if="canNewQuery" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')">
       <FilePlus2 class="h-3.5 w-3.5" />
       <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
     </Button>
@@ -557,6 +610,10 @@ const toolbarStyle = computed(() => {
         <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
         <!-- 小圆点仅提示"有可更新驱动"，具体数量交给对话框内标签页红点展示，避免工具栏长期挂红数字。 -->
         <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-block h-2 w-2 rounded-full bg-red-500" :aria-label="t('toolbar.updatableDriverCount')" :title="t('toolbar.updatableDriverCount')" />
+      </Button>
+      <Button v-if="toolbarItems.pluginCenter" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showPluginCenter }]" @click="emit('open-plugin-center')">
+        <PlugZap class="h-3.5 w-3.5" />
+        <span :class="toolbarTextLabelClass">{{ t("toolbar.pluginCenter") }}</span>
       </Button>
 
       <LightDropdown
@@ -594,18 +651,47 @@ const toolbarStyle = computed(() => {
 
     <!-- Right-side items wrapped in overflow-aware container -->
     <div ref="rightWrapper" class="flex min-w-0 items-center gap-1 overflow-hidden">
-      <template v-if="toolbarItems.checkUpdates">
+      <template v-if="showToolbarUpdateEntry">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <ToolbarUpdateIcon :loading="checkingUpdates" :downloading="isDownloadingUpdate" :progress="updateDownloadProgress" />
-              <span v-if="updateReady || updateReadyToInstall" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-background" />
-              <span v-else-if="hasUpdateAvailable && !isDownloadingUpdate" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+            <Button
+              v-show="isRightItemVisible('checkUpdates')"
+              data-toolbar-update-trigger
+              :data-toolbar-update-action="hasUpdateAvailable ? '' : undefined"
+              :variant="hasUpdateAvailable ? 'default' : 'ghost'"
+              :size="hasUpdateAvailable ? 'sm' : 'icon'"
+              class="toolbar-action-button shrink-0"
+              :class="hasUpdateAvailable ? 'h-7 gap-1.5 px-2 text-xs' : 'relative h-8 w-8'"
+              @click="emit('check-updates')"
+            >
+              <template v-if="hasUpdateAvailable">
+                <CloudDownload class="h-3.5 w-3.5" />
+                <span>{{ t("updates.updateAction") }}</span>
+              </template>
+              <ToolbarUpdateIcon v-else :available="false" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ updateTooltip }}</TooltipContent>
         </Tooltip>
       </template>
+
+      <Tooltip v-if="showAlwaysOnTopButton">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="toolbar-action-button relative h-8 w-8 shrink-0"
+            :class="{ 'toolbar-action-button--active bg-accent': isAlwaysOnTop }"
+            :aria-pressed="isAlwaysOnTop"
+            :aria-label="isAlwaysOnTop ? t('toolbar.alwaysOnTopOff') : t('toolbar.alwaysOnTop')"
+            @click="toggleAlwaysOnTop"
+          >
+            <Pin v-if="isAlwaysOnTop" class="toolbar-action-icon h-4 w-4 fill-current" />
+            <PinOff v-else class="toolbar-action-icon h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ isAlwaysOnTop ? t("toolbar.alwaysOnTopOff") : t("toolbar.alwaysOnTop") }}</TooltipContent>
+      </Tooltip>
 
       <div v-show="isRightItemVisible('exportProgress')" class="contents">
         <ExportProgressPopover />
@@ -709,6 +795,16 @@ const toolbarStyle = computed(() => {
           </Button>
         </TooltipTrigger>
         <TooltipContent>GitHub</TooltipContent>
+      </Tooltip>
+
+      <Tooltip v-for="entry in pluginCommandEntries" :key="`${entry.pluginId}.${entry.commandId}`">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': dockVisible }" :aria-label="entry.label" @click="togglePluginCommand(entry)">
+            <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="toolbar-action-icon h-4 w-4" />
+            <span v-if="dockVisible" class="toolbar-panel-status" aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ entry.label }} · {{ entry.pluginName }}</TooltipContent>
       </Tooltip>
     </div>
     <!-- /rightWrapper -->

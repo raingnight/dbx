@@ -1,6 +1,57 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+export interface CopySourceColumnDetails {
+  /** Column default as shown in the copy-fields dialog, or null when there is none. */
+  defaultValue: string | null;
+  /** Column comment as shown in the copy-fields dialog, or null when there is none. */
+  comment: string | null;
+}
+
+/**
+ * Read-only summary rendered under a column name in the "copy fields from another
+ * table" dialog. The source table is not open while copying, so the comment and
+ * default value are the only hint about what an unfamiliar field means.
+ */
+export function copySourceColumnDetails(column: Pick<ColumnInfo, "column_default" | "comment" | "data_type">, databaseType?: DatabaseType): CopySourceColumnDetails {
+  // Match the main grid and the editor drafts so the dialog, the grid, and the
+  // copied result render the same normalized default for every database.
+  const defaultValue = column.column_default == null ? "" : columnDefaultForEditor(column, databaseType);
+  const rawComment = column.comment ?? "";
+  return {
+    defaultValue: defaultValue.trim() ? defaultValue.trim() : null,
+    comment: rawComment.trim() ? rawComment.trim() : null,
+  };
+}
+
+/** Copy-dialog search matches comments and default values on top of name and type. */
+export function matchesCopySourceColumnSearch(column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">, search: string, databaseType?: DatabaseType): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  const details = copySourceColumnDetails(column, databaseType);
+  return [column.name, column.data_type, details.defaultValue ?? "", details.comment ?? ""].some((value) => value.toLowerCase().includes(query));
+}
+
+/**
+ * Column names offered by the structure editor's "copy all column names" action.
+ * Fields marked for drop disappear on save, so they are not offered.
+ */
+export function structureColumnNamesForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "markedForDrop">[]): string[] {
+  return columns.filter((column) => !column.markedForDrop && column.name.trim()).map((column) => column.name.trim());
+}
+
+/** Comment lookup for the same action, keyed by the trimmed column name. */
+export function structureColumnCommentsForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "comment" | "markedForDrop">[]): Map<string, string> {
+  const comments = new Map<string, string>();
+  for (const column of columns) {
+    if (column.markedForDrop) continue;
+    const name = column.name.trim();
+    const comment = column.comment?.trim();
+    if (name && comment) comments.set(name, comment);
+  }
+  return comments;
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }
@@ -579,6 +630,68 @@ export const SQLSERVER_TYPE_LENGTHS: Record<string, string> = {
 
 export const DEFAULT_TYPE_LENGTH_DISABLES: string[] = [];
 
+const DUCKDB_TYPE_LENGTH_DISABLES = new Set([
+  "tinyint",
+  "int1",
+  "smallint",
+  "int2",
+  "short",
+  "int16",
+  "integer",
+  "int",
+  "int4",
+  "signed",
+  "integral",
+  "int32",
+  "bigint",
+  "int8",
+  "long",
+  "oid",
+  "int64",
+  "hugeint",
+  "int128",
+  "utinyint",
+  "uint8",
+  "usmallint",
+  "uint16",
+  "uinteger",
+  "uint32",
+  "ubigint",
+  "uint64",
+  "uhugeint",
+  "uint128",
+  "real",
+  "float4",
+  "double",
+  "double precision",
+  "float8",
+  "boolean",
+  "bool",
+  "logical",
+  "blob",
+  "bytea",
+  "binary",
+  "varbinary",
+  "bit",
+  "bitstring",
+  "varint",
+  "bignum",
+  "date",
+  "time",
+  "time without time zone",
+  "time with time zone",
+  "timetz",
+  "timestamptz",
+  "timestamp with time zone",
+  "timestamp_s",
+  "timestamp_ms",
+  "timestamp_ns",
+  "uuid",
+  "guid",
+  "json",
+  "interval",
+]);
+
 export const POSTGRES_TYPE_LENGTH_DISABLES: string[] = [
   "bigint",
   "int8",
@@ -635,6 +748,7 @@ export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date"
 export function supportsTableStructureExtendedProperties(databaseType?: DatabaseType): boolean {
   return (
     databaseType === "mysql" ||
+    databaseType === "sqlite" ||
     databaseType === "dameng" ||
     databaseType === "manticoresearch" ||
     databaseType === "sqlserver" ||
@@ -654,11 +768,11 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
   const lower = extra.toLowerCase().trim();
   if (!lower) return result;
 
-  if (databaseType === "mysql") {
-    if (lower.includes("auto_increment")) {
+  if (databaseType === "mysql" || databaseType === "sqlite") {
+    if (lower.includes("auto_increment") || lower.includes("autoincrement")) {
       result.autoIncrement = true;
     }
-    if (lower.includes("on update current_timestamp")) {
+    if (databaseType === "mysql" && lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
   } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
@@ -826,7 +940,7 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
   return value;
 }
 
-function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+function columnDefaultForEditor(column: Pick<ColumnInfo, "column_default" | "data_type">, databaseType?: DatabaseType): string {
   if (column.column_default === null) return "";
   const defaultValue = column.column_default;
   if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {
@@ -843,6 +957,10 @@ const NUMERIC_PRECISION_METADATA_TYPES = new Set(["decimal", "number", "numeric"
 const XUGU_SINGLE_PRECISION_METADATA_TYPES = new Set(["bit", "time", "time with time zone", "timestamp", "timestamp with time zone", "varbit"]);
 
 function columnDataTypeForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+  if (databaseType === "duckdb") {
+    const normalized = normalizeDuckdbDataType(column.data_type);
+    if (normalized !== column.data_type) return normalized;
+  }
   const parsed = splitDataTypeForDatabase(databaseType, column.data_type);
   if (parsed.params) return column.data_type;
 
@@ -1029,6 +1147,7 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     indexType: normalizeStructureIndexType(index.index_type),
     includedColumns: index.included_columns ? [...index.included_columns] : [],
     comment: index.comment ?? "",
+    columnOpclasses: index.column_opclasses ? [...index.column_opclasses] : [],
     original: index,
     markedForDrop: false,
   }));
@@ -1141,6 +1260,10 @@ export function splitDataType(raw: string): { baseType: string; params: string }
 }
 
 function splitDataTypeForDatabase(dbType: DatabaseType | undefined, raw: string): { baseType: string; params: string } {
+  if (dbType === "duckdb") {
+    const parsed = splitDuckdbScalarDataType(raw);
+    if (parsed) return parsed;
+  }
   if (dbType === "xugu") {
     const match = raw.trim().match(/^(TIME|TIMESTAMP)\s*\(([^()]*)\)\s+WITH\s+TIME\s+ZONE$/i);
     if (match) {
@@ -1262,23 +1385,49 @@ export function combineDataType(baseType: string, params: string): string {
 }
 
 export function combineDataTypeForDatabase(dbType: DatabaseType | undefined, baseType: string, params: string): string {
+  if (dbType === "duckdb") baseType = normalizeDuckdbDataType(baseType);
   if (isDataTypeLengthDisabled(dbType, baseType)) {
     return baseType;
   }
   const normalizedParams = normalizeDataTypeParams(dbType, baseType, params);
   const mysqlType = combineMysqlNumericAttributeType(dbType, baseType, normalizedParams);
   if (mysqlType) return mysqlType;
-  const xuguTemporalType = combineXuguTemporalType(baseType, normalizedParams, dbType);
-  if (xuguTemporalType) return xuguTemporalType;
+  const qualifiedTemporalType = combineQualifiedTemporalType(baseType, normalizedParams, dbType);
+  if (qualifiedTemporalType) return qualifiedTemporalType;
   return combineDataType(baseType, normalizedParams);
 }
 
 export function dataTypeLengthInputValue(dbType: DatabaseType | undefined, rawDataType: string): string {
   const parsed = splitDataTypeForDatabase(dbType, rawDataType);
+  if (dbType === "duckdb") {
+    return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : normalizeDataTypeParams(dbType, parsed.baseType, parsed.params);
+  }
   return isDataTypeLengthDisabled(dbType, parsed.baseType) ? "" : splitDataTypeLengthParams(dbType, rawDataType).length;
 }
 
-function combineXuguTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+function splitDuckdbScalarDataType(raw: string): { baseType: string; params: string } | null {
+  const match = raw.trim().match(/^([a-z][a-z0-9_\s]*?)\s*\(([^()]*)\)(?:\s+(WITH(?:OUT)?\s+TIME\s+ZONE))?$/i);
+  if (!match) return null;
+  const baseType = match[1]!.trim();
+  if (match[3] && !/^(time|timestamp)$/i.test(baseType)) return null;
+  return { baseType: match[3] ? `${baseType} ${match[3]}` : baseType, params: match[2]!.trim() };
+}
+
+function normalizeDuckdbDataType(raw: string): string {
+  const parsed = splitDuckdbScalarDataType(raw);
+  if (!parsed?.params) return raw;
+  if (isDataTypeLengthDisabled("duckdb", parsed.baseType)) return parsed.baseType;
+  if (parsed.baseType.toLowerCase() === "float") {
+    return combineDataType(parsed.baseType, normalizeDataTypeParams("duckdb", parsed.baseType, parsed.params));
+  }
+  return raw;
+}
+
+function combineQualifiedTemporalType(baseType: string, params: string, dbType: DatabaseType | undefined): string | null {
+  if (dbType === "duckdb") {
+    const match = baseType.trim().match(/^(TIMESTAMP)\s+WITHOUT\s+TIME\s+ZONE$/i);
+    return match ? (params ? `${match[1]}(${params}) WITHOUT TIME ZONE` : baseType.trim()) : null;
+  }
   if (dbType !== "xugu") return null;
   const match = baseType.trim().match(/^(TIME|TIMESTAMP)\s+WITH\s+TIME\s+ZONE$/i);
   if (!match) return null;
@@ -1288,6 +1437,9 @@ function combineXuguTemporalType(baseType: string, params: string, dbType: Datab
 export function normalizeDataTypeParams(dbType: DatabaseType | undefined, baseType: string, params: string): string {
   const p = params.trim();
   if (!p) return "";
+  if (dbType === "duckdb" && baseType.trim().toLowerCase() === "float") {
+    return /^\d+$/.test(p) && Number(p) >= 1 && Number(p) <= 53 ? p : "";
+  }
   if (!isTemporalPrecisionType(dbType, baseType)) return p;
   return isValidTemporalPrecision(dbType, baseType, p) ? p : "";
 }
@@ -1363,6 +1515,7 @@ export interface DataTypeDefaultOptions {
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string, options: DataTypeDefaultOptions = {}): string {
   const key = baseType.trim().toLowerCase();
+  if (_dbType === "duckdb" && (key === "float" || isDataTypeLengthDisabled(_dbType, baseType))) return "";
   if (_dbType === "mysql" && options.omitMysqlDeprecatedDefaults && isMysqlDeprecatedDefaultParameterType(key)) return "";
   if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
     return "";
@@ -1440,7 +1593,9 @@ function isMysqlDeprecatedDefaultParameterType(baseType: string): boolean {
 
 export function isDataTypeLengthDisabled(_dbType: DatabaseType | undefined, baseType: string): boolean {
   const key = baseType.trim().toLowerCase();
-  if (_dbType === "questdb") {
+  if (_dbType === "duckdb") {
+    return DUCKDB_TYPE_LENGTH_DISABLES.has(key.replace(/\s+/g, " "));
+  } else if (_dbType === "questdb") {
     return key !== "geohash" && key !== "decimal";
   } else if (_dbType === "manticoresearch") {
     return key !== "bit" && key !== "float_vector";
@@ -1468,4 +1623,64 @@ export function buildStructureTargetLabel(connectionName: string | undefined, da
   if (schema && schema !== database) parts.push(schema);
   if (tableName) parts.push(tableName);
   return parts.filter(Boolean).join(" / ");
+}
+
+/** PostGIS `geometry(...)`/`geography(...)` typmod accepts these geometry sub-type
+ * names (case-insensitive). An empty value means "no sub-type constraint". */
+export const POSTGRES_GEOMETRY_TYPES: readonly string[] = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection", "CircularString", "CompoundCurve", "CurvePolygon", "MultiCurve", "MultiSurface", "PolyhedralSurface", "TIN", "Triangle"];
+
+const POSTGRES_SPATIAL_TYPES = new Set(["geometry", "geography"]);
+const POSTGRES_LIKE_DATABASES = new Set<DatabaseType | undefined>(["postgres", "gaussdb", "kwdb", "opengauss", "highgo", "uxdb", "vastbase", "kingbase"]);
+
+/** Whether a column is a PostGIS `geometry`/`geography` on a PostgreSQL-family
+ * database — the case where the structure editor shows dedicated geometry-type
+ * and SRID controls instead of the generic length input. */
+export function isPostgresGeometryDataType(dbType: DatabaseType | undefined, rawDataType: string): boolean {
+  if (!POSTGRES_LIKE_DATABASES.has(dbType)) return false;
+  const { baseType } = splitDataType(rawDataType);
+  return POSTGRES_SPATIAL_TYPES.has(baseType.trim().toLowerCase());
+}
+
+/** Geometry sub-type parsed from `geometry(Point,4326)` → `"Point"`. Returns empty
+ * for bare `geometry` (no typmod) and for `geometry(GEOMETRY,srid)` — the latter is
+ * PostGIS's storage form of "any sub-type" (what a blank sub-type + SRID compiles to),
+ * normalized back to empty to match the user-facing "leave blank" intent. This keeps
+ * the clear (X) button visually emptying the field instead of showing "GEOMETRY".
+ * `geometry(,4326)` is invalid and never produced. */
+export function postgresGeometryTypeValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  const geomType = splitPostgresGeometryParams(params).geomType;
+  return geomType.toLowerCase() === "geometry" ? "" : geomType;
+}
+
+/** SRID parsed from `geometry(Point,4326)` → `"4326"`. Empty when unspecified. */
+export function postgresGeometrySridValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  return splitPostgresGeometryParams(params).srid;
+}
+
+function splitPostgresGeometryParams(params: string): { geomType: string; srid: string } {
+  const trimmed = params.trim();
+  if (!trimmed) return { geomType: "", srid: "" };
+  const commaIndex = trimmed.indexOf(",");
+  if (commaIndex === -1) return { geomType: trimmed, srid: "" };
+  return { geomType: trimmed.slice(0, commaIndex).trim(), srid: trimmed.slice(commaIndex + 1).trim() };
+}
+
+/** Reassemble a PostGIS spatial type string from its parts.
+ *
+ * - both empty → bare `geometry` (no typmod)
+ * - sub-type only → `geometry(Point)`
+ * - SRID only   → `geometry(GEOMETRY,4326)` (PostGIS rejects `geometry(,4326)` (syntax error at `,`) and `geometry(4326)` ("Invalid geometry type modifier"); `GEOMETRY` is a valid sub-type token meaning any geometry, so it is the canonical way to constrain SRID only)
+ * - both        → `geometry(Point,4326)`
+ */
+export function combinePostgresGeometryType(baseType: string, geomType: string, srid: string): string {
+  const type = baseType.trim();
+  const geom = geomType.trim();
+  const sridValue = srid.trim();
+  if (!type) return "";
+  if (!geom && !sridValue) return type;
+  if (!geom) return `${type}(GEOMETRY,${sridValue})`; // PostGIS rejects geometry(,4326) and geometry(4326); GEOMETRY = any sub-type, constrains SRID only
+  if (!sridValue) return `${type}(${geom})`;
+  return `${type}(${geom},${sridValue})`;
 }

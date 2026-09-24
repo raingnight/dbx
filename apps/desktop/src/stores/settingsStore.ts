@@ -2,36 +2,42 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
+import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { type ColumnFormatterConfig, type CustomColumnFormatterConfig, normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern } from "@/lib/dataGrid/columnFormatter";
-import { type DataGridCopyPreference, type DataGridExtractorOptions, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { type DataGridCopyPreference, type DataGridExtractorOptions, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT, normalizeDataGridTextFilterPanelHeight } from "@/lib/dataGrid/dataGridTextFilterPanel";
 import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, type DataGridTypeColorScheme, normalizeActiveDataGridTypeColorSchemeId, normalizeDataGridTypeColorSchemes } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { DEFAULT_QUERY_RESULT_MAX_ROWS, normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
-import { normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
-import { needsTabNavigationHistoryShortcutMigration, normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
+import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
+import { needsTabNavigationHistoryShortcutMigration, normalizeShortcutSettings, isReservedShortcut, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT, REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
+import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { configureMetadataRuntimeCache, METADATA_CACHE_DEFAULT_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
 import type { AiApiStyle, AiAssistantMode, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlShortcutAction, SqlSnippet, TableInfoTab } from "@/types/database";
 
-export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, CsvQuoteMode, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
+export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, CsvQuoteMode, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode, TableHoverLookupMode };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -46,6 +52,8 @@ export interface DesktopSettings {
   driver_store_dir?: string | null;
   plugin_store_dir?: string | null;
   agent_store_dir?: string | null;
+  custom_ai_skill_root_enabled?: boolean | null;
+  custom_ai_skill_root?: string | null;
   sidebar_table_page_size?: number | null;
 }
 
@@ -53,11 +61,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedGroupIds: string[];
   allowedToolNames: string[] | null;
   connectionPolicies: McpConnectionPolicy[];
+  groupPolicies: McpGroupPolicy[];
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+}
+
+export interface McpGroupPolicy {
+  groupId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export interface McpConnectionPolicy {
@@ -106,6 +122,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   driver_store_dir: null,
   plugin_store_dir: null,
   agent_store_dir: null,
+  custom_ai_skill_root_enabled: false,
+  custom_ai_skill_root: null,
   sidebar_table_page_size: DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
 };
 
@@ -113,14 +131,17 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
   allowedConnectionIds: null,
+  allowedGroupIds: [],
   allowedToolNames: null,
   connectionPolicies: [],
+  groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
   const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  const allowedGroupIds = allowedConnectionIds === null ? [] : [...new Set((policy?.allowedGroupIds ?? []).filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
   const allowedToolNames = policy?.allowedToolNames === null || policy?.allowedToolNames === undefined ? null : [...new Set(policy.allowedToolNames.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim()))];
   const connectionPolicies = Object.values(
     (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
@@ -156,6 +177,20 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
       return rules;
     }, {}),
   );
+  const groupPolicies = Object.values(
+    (policy?.groupPolicies ?? []).reduce<Record<string, McpGroupPolicy>>((rules, rule) => {
+      if (!rule || typeof rule.groupId !== "string" || !rule.groupId.trim()) return rules;
+      const groupId = rule.groupId.trim();
+      const current = rules[groupId];
+      const readOnly = current?.readOnly === true || rule.readOnly === true;
+      rules[groupId] = {
+        groupId,
+        readOnly,
+        allowDangerousSql: !readOnly && (current ? current.allowDangerousSql && rule.allowDangerousSql === true : rule.allowDangerousSql === true),
+      };
+      return rules;
+    }, {}),
+  );
   // null / undefined / non-positive => null (inherit connection). 0 is preserved
   // as an explicit "no limit" only here; the UI maps "no limit" <=> 0 and
   // "inherit" <=> null.
@@ -164,8 +199,10 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
     allowedConnectionIds,
+    allowedGroupIds,
     allowedToolNames,
     connectionPolicies,
+    groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
   };
@@ -187,6 +224,8 @@ export function normalizeDesktopSettings(settings: Partial<DesktopSettings> | nu
     driver_store_dir: settings?.driver_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.driver_store_dir,
     plugin_store_dir: settings?.plugin_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.plugin_store_dir,
     agent_store_dir: settings?.agent_store_dir?.trim() || DEFAULT_DESKTOP_SETTINGS.agent_store_dir,
+    custom_ai_skill_root_enabled: settings?.custom_ai_skill_root_enabled ?? DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root_enabled,
+    custom_ai_skill_root: settings?.custom_ai_skill_root?.trim() || DEFAULT_DESKTOP_SETTINGS.custom_ai_skill_root,
     sidebar_table_page_size: sidebarTablePageSize,
   };
 }
@@ -268,6 +307,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     provider: "qwen",
     endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     model: "qwen-plus",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
+  zhipu: {
+    label: "Zhipu",
+    iconSlug: "zhipu",
+    provider: "zhipu",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-5.3",
     apiStyle: "completions",
     authMethod: "bearer",
     requiresApiKey: true,
@@ -416,14 +465,30 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     group: "partner",
     provider: "openai-compatible",
     endpoint: "https://api.jalapeno-cloud.ai/v1",
-    model: "GLM-5.2",
-    models: [{ name: "GLM-5.2" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
+    model: "GLM-5.3",
+    models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
     apiStyle: "completions",
     authMethod: "bearer",
     requiresApiKey: true,
     websiteUrl: "https://www.jalapeno-cloud.ai/dbx",
     apiKeyUrl: "https://www.jalapeno-cloud.ai/dbx",
     descriptionKey: "ai.jalapenoDescription",
+  },
+  {
+    id: "hualong-ai",
+    label: "HuaLongAI",
+    iconPath: "/icons/ai/hualong-ai.png",
+    group: "partner",
+    provider: "openai-compatible",
+    endpoint: "https://api.hualong.online/v1",
+    model: "deepseek-v4.1-flash",
+    models: [{ name: "deepseek-v4.1-flash" }],
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+    websiteUrl: "https://api.hualong.online/register?promo=DBX%26HUALONG",
+    apiKeyUrl: "https://api.hualong.online/register?promo=DBX%26HUALONG",
+    descriptionKey: "ai.hualongDescription",
   },
 ];
 
@@ -439,6 +504,16 @@ export function getAiProviderPreset(provider: AiProvider, endpoint = ""): AiProv
 
 export function getAiProviderPresetOption(id: string): AiProviderPreset | AiPartnerProviderPreset {
   return AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom;
+}
+
+export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiPartnerProviderPreset, locale: string): string {
+  if (preset.provider === "minimax" && locale === "zh-CN") {
+    return "https://api.minimaxi.com/v1";
+  }
+  if (preset.provider === "zhipu" && locale !== "zh-CN") {
+    return "https://api.z.ai/api/paas/v4";
+  }
+  return preset.endpoint;
 }
 
 export function getAiProviderPresetId(provider: AiProvider, endpoint = ""): string {
@@ -502,6 +577,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
+    skipTlsVerify: !!config?.skipTlsVerify,
     enableThinking: config?.enableThinking ?? true,
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
     maxOutputTokens,
@@ -535,6 +611,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   if (endpoint.includes("deepseek") || model.includes("deepseek")) return "deepseek";
   if (endpoint.includes("moonshot") || endpoint.includes("kimi.com") || model.includes("kimi")) return "kimi";
   if (endpoint.includes("dashscope") || endpoint.includes("aliyuncs") || model.includes("qwen")) return "qwen";
+  if (endpoint.includes("bigmodel.cn") || endpoint.includes("api.z.ai") || model.startsWith("glm-")) return "zhipu";
   if (endpoint.includes("generativelanguage.googleapis.com") || model.includes("gemini")) return "gemini";
   if (endpoint.includes("minimax.io") || endpoint.includes("minimaxi.com") || model.includes("minimax")) return "minimax";
   if (endpoint.includes("localhost:11434") || endpoint.includes("127.0.0.1:11434")) return "ollama";
@@ -574,7 +651,7 @@ const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
 export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];
 const TAB_PLACEMENTS = ["top", "bottom", "left", "right"] as const;
 export type TabPlacement = (typeof TAB_PLACEMENTS)[number];
-const TAB_GROUP_MODES = ["none", "database-type", "connection"] as const;
+const TAB_GROUP_MODES = ["none", "database-type", "database", "connection"] as const;
 export type TabGroupMode = (typeof TAB_GROUP_MODES)[number];
 export interface TabGroupCustomization {
   name?: string;
@@ -587,6 +664,7 @@ export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 export type DataGridFilterEditorView = "quick" | "conditions" | "text";
+export type DataGridToolbarLayout = "single" | "split";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
 export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 const MULTI_STATEMENT_DEFAULT_VIEWS = ["result", "summary"] as const;
@@ -602,6 +680,13 @@ export const SIDEBAR_INDENT_MAX = 32;
 export const SIDEBAR_INDENT_DEFAULT = 16;
 const DISCONNECT_TAB_HANDLING_MODES = ["close-tabs", "keep-tabs-clear-results", "keep-tabs-keep-results"] as const;
 export type DisconnectTabHandlingMode = (typeof DISCONNECT_TAB_HANDLING_MODES)[number];
+
+/**
+ * 删除连接（连接配置已从磁盘移除，无法再重连）时，对该连接已打开页签的处理策略。
+ * 与 {@link DisconnectTabHandlingMode} 分开：断开连接仍可重连，删除则不会。
+ */
+const DELETE_CONNECTION_TAB_HANDLING_MODES = ["close-tabs", "keep-sql-tabs", "keep-pinned-sql-tabs", "keep-all-tabs"] as const;
+export type DeleteConnectionTabHandlingMode = (typeof DELETE_CONNECTION_TAB_HANDLING_MODES)[number];
 
 const CLICK_TABLE_NAVIGATION_TARGETS = ["data", "ddl"] as const;
 export type ClickTableNavigationTarget = (typeof CLICK_TABLE_NAVIGATION_TARGETS)[number];
@@ -674,18 +759,31 @@ export const DEFAULT_CUSTOM_THEMES: CustomTheme[] = [
 
 export type SidebarObjectInfoMode = "comment-inline" | "comment-aligned" | "comment-right" | "size" | "hidden";
 
+/**
+ * 删除连接时记住的「连接名 → 数据库」。带上 `dbType` 是为了只在新建同名**同类型**
+ * 连接时回填——像 "test"/"local" 这类名字常被不同数据库类型复用，跨类型回填会把
+ * 无意义的库名写进新连接配置。
+ */
+export interface RememberedConnectionDatabase {
+  database: string;
+  dbType: string;
+}
+
 export interface EditorSettings {
   fontFamily: string;
   fontSize: number;
   uiFontFamily: string;
   uiScale: number;
   theme: EditorTheme;
+  backgroundImage: BackgroundImageSettings;
   customThemeColors: CustomThemeColors;
   customThemes: CustomTheme[];
   activeCustomThemeId: string;
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
   executeAllOnBlankLine: boolean;
+  /** Whether DBX blocks Redis commands classified as high risk. */
+  blockDangerousRedisCommands: boolean;
   globalConnectTimeoutSecs: number;
   connectTimeoutInheritConnectionIds: string[];
   globalQueryTimeoutSecs: number;
@@ -698,11 +796,14 @@ export interface EditorSettings {
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
   insertSpaceAfterCompletion: boolean;
+  sqlServerSpaceConfirmsCompletion: boolean;
   sortCompletionColumnsAlphabetically: boolean;
   selectFirstCompletionOnOpen: boolean;
   wordWrap: boolean;
+  showWhitespace: boolean;
   tableDdlWordWrap: boolean;
   refreshDdlOnOpen: boolean;
+  excludeDdlStorage: boolean;
   vimModeEnabled: boolean;
   autoCloseBrackets: boolean;
   sqlSemanticDiagnosticsMode: SqlSemanticDiagnosticsMode;
@@ -720,12 +821,17 @@ export interface EditorSettings {
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
+  tableOpenSortMode: "none" | "database" | "local";
+  tableDatabaseSortDirection: "asc" | "desc";
+  tableLocalSortDirection: "asc" | "desc";
   queryResultMaxRowsEnabled: boolean;
   queryResultMaxRows: number;
+  externalSqlEditorMaxMb: number;
   infiniteScroll: boolean;
   /** Preserved for downgrade compatibility; current clients use queryResultMaxRows. */
   infiniteScrollMaxRows: number;
   flatteningMultiLineText: boolean;
+  dataGridShowWhitespace: boolean;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
   mongoViewMode: "document" | "table";
@@ -740,12 +846,17 @@ export interface EditorSettings {
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
+  dataGridToolbarLayout: DataGridToolbarLayout;
+  dataGridKeepFilterEditorExpanded: boolean;
   dataGridTextFilterPanelHeight: number;
+  localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
   dataGridCopyExtractor: DataGridCopyPreference;
   dataGridExtractorOptions: DataGridExtractorOptions;
+  dataGridExtractorOptionsMigrationVersion: number;
   resultRunDisplayMode: ResultRunDisplayMode;
+  defaultAutoKeepResults: boolean;
   multiStatementDefaultView: MultiStatementDefaultView;
   dataGridAutoTransposeSingleRow: boolean;
   dataGridCellDetailButtonVisible: boolean;
@@ -758,6 +869,7 @@ export interface EditorSettings {
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoActiveTab: TableInfoTab;
+  tableInfoDrawerPinned: boolean;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
@@ -774,14 +886,29 @@ export interface EditorSettings {
   sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
+  sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
+  deleteConnectionTabHandlingMode: DeleteConnectionTabHandlingMode;
+  /** 删除连接时记住「连接名 → 数据库名」，新建同名同类型连接时自动回填并重绑保留的 SQL 页签。 */
+  rememberConnectionDatabaseOnDelete: boolean;
+  /** 已记住的「连接名 → { 数据库名, 数据库类型 }」映射，用于新建同名连接时自动选中数据库。 */
+  rememberedConnectionDatabases: Record<string, RememberedConnectionDatabase>;
   dataTabReuseMode: DataTabReuseMode;
   openDataTabsNextToActive: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
+  generateSqlQuoteIdentifiers: boolean;
   formatSqlOnSqlFileSave: boolean;
+  /** Legacy alias retained for settings-file compatibility. Mirrors autoUpdateApp. */
   updateNotificationsEnabled: boolean;
+  /** Legacy setting retained for compatibility. Mirrors autoUpdateApp after the centralized update controls are enabled. */
+  autoDownloadUpdates: boolean;
+  autoUpdateApp: boolean;
+  autoUpdateDrivers: boolean;
+  autoUpdateJdbc: boolean;
+  autoUpdateMcp: boolean;
+  autoUpdatePlugins: boolean;
   sidebarHiddenTablePrefixes: string[];
   sidebarCopyTableNameSeparator: ColumnNameCopySeparator;
   sidebarCopyTableNameIncludeSchema: boolean;
@@ -803,6 +930,8 @@ export interface EditorSettings {
   csvQuoteMode: CsvQuoteMode;
   /** Global Redis key-search templates; overridden by non-empty connection templates. */
   redisKeyTemplates: string[];
+  /** Sidebar database-list cap for Redis connections; the rest are revealed via "load more". */
+  redisDatabaseDisplayLimit: number;
   exportRowLimitEnabled: boolean;
   exportRowLimit: number;
   queryExportKeysetOptimizationEnabled: boolean;
@@ -815,14 +944,22 @@ export interface EditorSettings {
   sqlVariableSyntaxOverrides: SqlVariableSyntaxOverrides;
   continueOnErrorOnBatch: boolean;
   showTableDdlHoverPreview: boolean;
+  tableHoverLookupMode: TableHoverLookupMode;
   clickTableNavigationTarget: ClickTableNavigationTarget;
   completionTriggerMode: SqlCompletionTriggerMode;
   defaultTransactionMode: DefaultTransactionMode;
+  /** Auto-commit (`Tx:A`) tabs with a MySQL-family connection: keep a
+   *  transaction the user opens explicitly (`BEGIN` / `START TRANSACTION`) open
+   *  across executions until COMMIT / ROLLBACK instead of rolling it back when
+   *  each execution ends. Off by default: the rollback is what stops a leftover
+   *  transaction from pinning the tab's read snapshot (#9479). */
+  keepExplicitTransactionInAutoCommit: boolean;
 }
 
 export interface ToolbarItems {
   dataTransfer: boolean;
   driverManager: boolean;
+  pluginCenter: boolean;
   sqlFile: boolean;
   schemaDiff: boolean;
   dataCompare: boolean;
@@ -833,12 +970,17 @@ export interface ToolbarItems {
   ai: boolean;
   theme: boolean;
   github: boolean;
+  /** Always-on-top window control. Off by default: the toolbar's right side is
+   *  the most crowded strip in the app and keeping a window above every other
+   *  application is not a day-to-day action, so the button is opt-in. */
+  alwaysOnTop: boolean;
   exclusiveRightSidebarPanels: boolean;
 }
 
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataTransfer: true,
   driverManager: true,
+  pluginCenter: true,
   sqlFile: true,
   schemaDiff: true,
   dataCompare: true,
@@ -849,6 +991,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   ai: true,
   theme: true,
   github: true,
+  alwaysOnTop: false,
   exclusiveRightSidebarPanels: true,
 };
 
@@ -901,6 +1044,7 @@ export const EDITOR_THEMES: {
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
 
 export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
+export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
@@ -908,15 +1052,17 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
   uiScale: 1,
   theme: "app",
+  backgroundImage: defaultBackgroundImageSettings(),
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
   customThemes: [...DEFAULT_CUSTOM_THEMES],
   activeCustomThemeId: "default",
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   executeAllOnBlankLine: false,
+  blockDangerousRedisCommands: true,
   globalConnectTimeoutSecs: 10,
   connectTimeoutInheritConnectionIds: [],
-  globalQueryTimeoutSecs: 30,
+  globalQueryTimeoutSecs: DEFAULT_QUERY_TIMEOUT_SECS,
   queryTimeoutInheritConnectionIds: [],
   timeoutInheritanceMigrationVersion: 2,
   showExecutionTargetPicker: false,
@@ -926,11 +1072,14 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   autoAliasTables: true,
   insertSpaceAfterCompletion: true,
+  sqlServerSpaceConfirmsCompletion: false,
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
   wordWrap: false,
+  showWhitespace: false,
   tableDdlWordWrap: true,
   refreshDdlOnOpen: false,
+  excludeDdlStorage: true,
   vimModeEnabled: false,
   autoCloseBrackets: true,
   sqlSemanticDiagnosticsMode: "auto",
@@ -948,11 +1097,16 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
+  tableOpenSortMode: "none",
+  tableDatabaseSortDirection: "asc",
+  tableLocalSortDirection: "asc",
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: DEFAULT_QUERY_RESULT_MAX_ROWS,
+  externalSqlEditorMaxMb: 64,
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
   flatteningMultiLineText: false,
+  dataGridShowWhitespace: false,
   regexMaxMatchCount: 1000,
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
@@ -967,12 +1121,17 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
+  dataGridToolbarLayout: "single",
+  dataGridKeepFilterEditorExpanded: false,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
+  localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
   dataGridCopyExtractor: "smart",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
+  dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   resultRunDisplayMode: "tabs",
+  defaultAutoKeepResults: false,
   multiStatementDefaultView: "result",
   dataGridAutoTransposeSingleRow: false,
   dataGridCellDetailButtonVisible: true,
@@ -985,6 +1144,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoActiveTab: "ddl",
+  tableInfoDrawerPinned: false,
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
@@ -1001,14 +1161,25 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
   sidebarBrowseObjectsOnDatabaseActivation: false,
+  sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
+  deleteConnectionTabHandlingMode: "close-tabs",
+  rememberConnectionDatabaseOnDelete: true,
+  rememberedConnectionDatabases: {},
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
   openDataTabsNextToActive: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
+  generateSqlQuoteIdentifiers: true,
   formatSqlOnSqlFileSave: false,
   updateNotificationsEnabled: true,
+  autoDownloadUpdates: true,
+  autoUpdateApp: true,
+  autoUpdateDrivers: true,
+  autoUpdateJdbc: true,
+  autoUpdateMcp: true,
+  autoUpdatePlugins: true,
   sidebarHiddenTablePrefixes: [],
   sidebarCopyTableNameSeparator: "comma",
   sidebarCopyTableNameIncludeSchema: false,
@@ -1024,11 +1195,12 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
   snippets: DEFAULT_SQL_SNIPPETS,
-  sqlShortcuts: [],
+  sqlShortcuts: DEFAULT_SQL_SHORTCUTS,
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
   csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
   redisKeyTemplates: [],
+  redisDatabaseDisplayLimit: REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT,
   exportRowLimitEnabled: false,
   exportRowLimit: 100000,
   queryExportKeysetOptimizationEnabled: true,
@@ -1041,16 +1213,18 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlVariableSyntaxOverrides: {},
   continueOnErrorOnBatch: false,
   showTableDdlHoverPreview: true,
+  tableHoverLookupMode: "fallback",
   clickTableNavigationTarget: "data",
   completionTriggerMode: "positional",
   defaultTransactionMode: "auto",
+  keepExplicitTransactionInAutoCommit: false,
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 const EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY = "dbx-export-batch-size-default-migrated-v1";
 const LEGACY_DEFAULT_EXPORT_BATCH_SIZE = 10000;
-const MIN_UI_SCALE = 0.75;
+const MIN_UI_SCALE = 0.7;
 const MAX_UI_SCALE = 2;
 
 export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
@@ -1130,6 +1304,10 @@ function normalizeDataGridFilterEditorView(value: unknown): DataGridFilterEditor
   return value === "conditions" || value === "text" ? value : DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
 }
 
+function normalizeDataGridToolbarLayout(value: unknown): DataGridToolbarLayout {
+  return value === "single" || value === "split" ? value : DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
+}
+
 function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
   return RESULT_RUN_DISPLAY_MODES.includes(value as ResultRunDisplayMode) ? (value as ResultRunDisplayMode) : DEFAULT_EDITOR_SETTINGS.resultRunDisplayMode;
 }
@@ -1181,6 +1359,35 @@ function normalizeDisconnectTabHandlingMode(value: unknown, legacyCloseTabsOnDis
     return legacyCloseTabsOnDisconnect ? "close-tabs" : "keep-tabs-clear-results";
   }
   return DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
+}
+
+function normalizeDeleteConnectionTabHandlingMode(value: unknown): DeleteConnectionTabHandlingMode {
+  if (DELETE_CONNECTION_TAB_HANDLING_MODES.includes(value as DeleteConnectionTabHandlingMode)) {
+    return value as DeleteConnectionTabHandlingMode;
+  }
+  // 兼容早期试验值：把「保留页签」统一收敛到最接近的正式取值。
+  if (value === "keep-tabs" || value === "keep-sql") return "keep-sql-tabs";
+  if (value === "keep-pinned" || value === "keep-fixed-tabs") return "keep-pinned-sql-tabs";
+  if (value === "keep-all") return "keep-all-tabs";
+  return DEFAULT_EDITOR_SETTINGS.deleteConnectionTabHandlingMode;
+}
+
+/** 记住的连接名 → 数据库映射：只保留合法条目，并限制条目数量避免无限增长。 */
+const REMEMBERED_CONNECTION_DATABASES_LIMIT = 200;
+
+function normalizeRememberedConnectionDatabases(value: unknown): Record<string, RememberedConnectionDatabase> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: [string, RememberedConnectionDatabase][] = [];
+  for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
+    const key = name.trim();
+    if (!key || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const { database, dbType } = entry as { database?: unknown; dbType?: unknown };
+    if (typeof database !== "string" || !database.trim() || typeof dbType !== "string") continue;
+    entries.push([key, { database, dbType }]);
+  }
+  if (entries.length <= REMEMBERED_CONNECTION_DATABASES_LIMIT) return Object.fromEntries(entries);
+  // 超出上限时保留最后写入的部分（对象插入顺序即写入顺序）。
+  return Object.fromEntries(entries.slice(entries.length - REMEMBERED_CONNECTION_DATABASES_LIMIT));
 }
 
 function normalizeClickTableNavigationTarget(value: unknown): ClickTableNavigationTarget {
@@ -1264,15 +1471,35 @@ function normalizeSqlShortcuts(value: unknown, existing?: SqlShortcutAction[]): 
     if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.label !== "string" || !item.label || typeof item.shortcut !== "string" || typeof item.sql !== "string") {
       continue;
     }
-    valid.push({
+    const shortcut = item.shortcut.trim();
+    // SQL 快捷键走 createQueryEditorSqlShortcutDomHandler：匹配后 preventDefault，
+    // 与普通动作一样会重新劫持 macOS 的 ⌘H。此处直接丢弃保留组合——SQL 快捷键
+    // 没有“平台默认值”这一概念（它是用户自定义模板的专属触发键），清空即视为未绑定。
+    const normalizedShortcut = isReservedShortcut(shortcut) ? "" : shortcut;
+    const kind = normalizeSqlShortcutKind(item.kind);
+    let databaseTypes = normalizeSqlShortcutDatabaseTypes(item.databaseTypes);
+    const entry: SqlShortcutAction = {
       id: item.id,
       label: item.label,
-      shortcut: item.shortcut.trim(),
+      shortcut: normalizedShortcut,
       sql: item.sql,
       enabled: item.enabled !== false,
-    });
+    };
+    const sqlByDatabaseType = normalizeSqlShortcutSqlByDatabaseType(item.sqlByDatabaseType);
+    if (sqlByDatabaseType && kind !== "select-limit") entry.sqlByDatabaseType = sqlByDatabaseType;
+    databaseTypes = deriveSqlShortcutDatabaseTypes(databaseTypes, entry.sqlByDatabaseType);
+    if (databaseTypes) entry.databaseTypes = databaseTypes;
+    if (kind === "select-limit") {
+      entry.kind = "select-limit";
+      entry.limit = normalizeSqlShortcutLimit(item.limit);
+      entry.sql = canonicalSqlShortcutSql(entry);
+      delete entry.databaseTypes;
+      delete entry.sqlByDatabaseType;
+    }
+    valid.push(entry);
   }
-  return valid;
+  if (valid.length === 0) return DEFAULT_SQL_SHORTCUTS.map((action) => ({ ...action }));
+  return mergeDefaultSqlShortcuts(valid);
 }
 
 function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): ToolbarItems {
@@ -1281,6 +1508,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   return {
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
+    pluginCenter: items.pluginCenter ?? defaults.pluginCenter,
     sqlFile: items.sqlFile ?? defaults.sqlFile,
     schemaDiff: items.schemaDiff ?? defaults.schemaDiff,
     dataCompare: items.dataCompare ?? defaults.dataCompare,
@@ -1291,12 +1519,16 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,
     github: items.github ?? defaults.github,
+    // Unlike the entries above, a newly added toolbar button stays hidden until
+    // the user asks for it, so upgrading never adds another control to the
+    // crowded right side of the toolbar.
+    alwaysOnTop: items.alwaysOnTop === true,
     // Saved settings from before right-sidebar exclusivity must adopt the new default.
     exclusiveRightSidebarPanels: items.exclusiveRightSidebarPanels !== false,
   };
 }
 
-const TABLE_INFO_TABS = new Set<TableInfoTab>(["ddl", "columns", "indexes", "foreignKeys", "constraints", "triggers"]);
+const TABLE_INFO_TABS = new Set<TableInfoTab>(["info", "ddl", "columns", "indexes", "foreignKeys", "constraints", "triggers", "partitions"]);
 
 function normalizeTableInfoTab(value: unknown): TableInfoTab {
   return typeof value === "string" && TABLE_INFO_TABS.has(value as TableInfoTab) ? (value as TableInfoTab) : DEFAULT_EDITOR_SETTINGS.tableInfoActiveTab;
@@ -1304,12 +1536,30 @@ function normalizeTableInfoTab(value: unknown): TableInfoTab {
 
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
   const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
+  const legacySidebarOpenDatabaseOnSingleClick = (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick;
+  const legacyDataGridAutoHideFilterBuilder = (settings as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown }).dataGridAutoHideFilterBuilder;
+  const hasDataGridKeepFilterEditorExpanded = Object.prototype.hasOwnProperty.call(settings, "dataGridKeepFilterEditorExpanded");
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
   const hasCurrentExecuteModeDefault = executeModeDefaultVersion === savedExecuteModeDefaultVersion;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
+  const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
+  const normalizedExtractorOptions = normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions);
+  const isLegacyExtractorOptions = typeof savedExtractorMigrationVersion !== "number" || savedExtractorMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
+  const dataGridExtractorOptions = isLegacyExtractorOptions && normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
+  // Preserve the explicit intent behind the legacy update controls. Disabling
+  // update reminders was a full opt-out; disabling automatic downloads only
+  // opted out of downloading the DBX package itself.
+  const legacyUpdateOptOut = settings.updateNotificationsEnabled === false;
+  const legacyAutoDownload = typeof settings.autoDownloadUpdates === "boolean" ? settings.autoDownloadUpdates : undefined;
+  const autoUpdateApp = typeof settings.autoUpdateApp === "boolean" ? settings.autoUpdateApp : legacyUpdateOptOut ? false : (legacyAutoDownload ?? DEFAULT_EDITOR_SETTINGS.autoUpdateApp);
+  const autoDownloadUpdates = autoUpdateApp;
+  const autoUpdateDrivers = typeof settings.autoUpdateDrivers === "boolean" ? settings.autoUpdateDrivers : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
+  const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
+  const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
+  const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -1352,6 +1602,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
     executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
+    blockDangerousRedisCommands: typeof settings.blockDangerousRedisCommands === "boolean" ? settings.blockDangerousRedisCommands : DEFAULT_EDITOR_SETTINGS.blockDangerousRedisCommands,
     globalConnectTimeoutSecs: normalizeGlobalConnectTimeoutSecs(settings.globalConnectTimeoutSecs),
     connectTimeoutInheritConnectionIds: Array.isArray(settings.connectTimeoutInheritConnectionIds) ? [...new Set(settings.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
     globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs ?? legacyTimeoutSettings.queryTimeoutSecs),
@@ -1369,10 +1620,13 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
+    sqlServerSpaceConfirmsCompletion: typeof settings.sqlServerSpaceConfirmsCompletion === "boolean" ? settings.sqlServerSpaceConfirmsCompletion : DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
+    showWhitespace: typeof settings.showWhitespace === "boolean" ? settings.showWhitespace : DEFAULT_EDITOR_SETTINGS.showWhitespace,
     tableDdlWordWrap: typeof settings.tableDdlWordWrap === "boolean" ? settings.tableDdlWordWrap : DEFAULT_EDITOR_SETTINGS.tableDdlWordWrap,
+    excludeDdlStorage: typeof settings.excludeDdlStorage === "boolean" ? settings.excludeDdlStorage : DEFAULT_EDITOR_SETTINGS.excludeDdlStorage,
     refreshDdlOnOpen: typeof settings.refreshDdlOnOpen === "boolean" ? settings.refreshDdlOnOpen : DEFAULT_EDITOR_SETTINGS.refreshDdlOnOpen,
     vimModeEnabled: typeof settings.vimModeEnabled === "boolean" ? settings.vimModeEnabled : DEFAULT_EDITOR_SETTINGS.vimModeEnabled,
     autoCloseBrackets: typeof settings.autoCloseBrackets === "boolean" ? settings.autoCloseBrackets : DEFAULT_EDITOR_SETTINGS.autoCloseBrackets,
@@ -1391,11 +1645,16 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
+    tableOpenSortMode: settings.tableOpenSortMode === "database" || settings.tableOpenSortMode === "local" ? settings.tableOpenSortMode : "none",
+    tableDatabaseSortDirection: settings.tableDatabaseSortDirection === "desc" ? "desc" : "asc",
+    tableLocalSortDirection: settings.tableLocalSortDirection === "desc" ? "desc" : "asc",
     queryResultMaxRowsEnabled: settings.queryResultMaxRowsEnabled !== false,
     queryResultMaxRows: normalizeQueryResultMaxRows(settings.queryResultMaxRows),
+    externalSqlEditorMaxMb: normalizeExternalSqlEditorMaxMb(settings.externalSqlEditorMaxMb),
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
     flatteningMultiLineText: settings.flatteningMultiLineText ?? DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText,
+    dataGridShowWhitespace: settings.dataGridShowWhitespace ?? DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace,
     regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
@@ -1410,12 +1669,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
+    dataGridToolbarLayout: normalizeDataGridToolbarLayout(settings.dataGridToolbarLayout),
+    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
+    localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
-    dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
+    dataGridExtractorOptions,
+    dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
+    defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
     multiStatementDefaultView: normalizeMultiStatementDefaultView(settings.multiStatementDefaultView),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
     dataGridCellDetailButtonVisible: typeof settings.dataGridCellDetailButtonVisible === "boolean" ? settings.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible,
@@ -1428,6 +1692,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
+    tableInfoDrawerPinned: settings.tableInfoDrawerPinned === true,
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
@@ -1446,9 +1711,14 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"
         ? settings.sidebarBrowseObjectsOnDatabaseActivation
-        : typeof (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick === "boolean"
-          ? (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick: boolean }).sidebarOpenDatabaseOnSingleClick
+        : typeof legacySidebarOpenDatabaseOnSingleClick === "boolean"
+          ? // The legacy false value only disabled single-click browsing; double-click still opened the browser.
+            true
           : DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation,
+    sidebarBrowseObjectsOnDatabaseActivationMigrationVersion:
+      typeof settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion === "number" && settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion >= SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION
+        ? Math.floor(settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion)
+        : SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode(
       (settings as Partial<EditorSettings>).openTabsRestoreMode,
       (
@@ -1465,6 +1735,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
         }
       ).closeQueryTabsOnDisconnect,
     ),
+    deleteConnectionTabHandlingMode: normalizeDeleteConnectionTabHandlingMode(settings.deleteConnectionTabHandlingMode),
+    rememberConnectionDatabaseOnDelete: typeof settings.rememberConnectionDatabaseOnDelete === "boolean" ? settings.rememberConnectionDatabaseOnDelete : DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete,
+    rememberedConnectionDatabases: normalizeRememberedConnectionDatabases(settings.rememberedConnectionDatabases),
     dataTabReuseMode: normalizeDataTabReuseMode(
       settings.dataTabReuseMode,
       (
@@ -1476,8 +1749,15 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
+    generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
     formatSqlOnSqlFileSave: settings.formatSqlOnSqlFileSave === true,
-    updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
+    updateNotificationsEnabled: autoUpdateApp,
+    autoDownloadUpdates,
+    autoUpdateApp,
+    autoUpdateDrivers,
+    autoUpdateJdbc,
+    autoUpdateMcp,
+    autoUpdatePlugins,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarCopyTableNameSeparator: normalizeSidebarCopyTableNameSeparator(settings.sidebarCopyTableNameSeparator),
     sidebarCopyTableNameIncludeSchema: settings.sidebarCopyTableNameIncludeSchema === true,
@@ -1515,6 +1795,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
     csvQuoteMode: normalizeCsvQuoteMode(settings.csvQuoteMode),
     redisKeyTemplates: normalizeRedisKeyTemplates(settings.redisKeyTemplates),
+    redisDatabaseDisplayLimit:
+      typeof settings.redisDatabaseDisplayLimit === "number" && settings.redisDatabaseDisplayLimit >= REDIS_DATABASE_DISPLAY_LIMIT_MIN && settings.redisDatabaseDisplayLimit <= REDIS_DATABASE_DISPLAY_LIMIT_MAX
+        ? Math.round(settings.redisDatabaseDisplayLimit)
+        : DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit,
     exportRowLimitEnabled: typeof settings.exportRowLimitEnabled === "boolean" ? settings.exportRowLimitEnabled : DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled,
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
@@ -1527,10 +1811,27 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sqlVariableSyntaxOverrides: normalizeSqlVariableSyntaxOverrides(settings.sqlVariableSyntaxOverrides),
     continueOnErrorOnBatch: settings.continueOnErrorOnBatch === true,
     showTableDdlHoverPreview: typeof settings.showTableDdlHoverPreview === "boolean" ? settings.showTableDdlHoverPreview : DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview,
+    tableHoverLookupMode: normalizeTableHoverLookupMode(settings.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode),
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
+    keepExplicitTransactionInAutoCommit: settings.keepExplicitTransactionInAutoCommit === true,
+    backgroundImage: normalizeBackgroundImageSettings(settings.backgroundImage),
   };
+}
+
+/**
+ * Cloud snapshots are applied as partial settings updates rather than loaded
+ * through `normalizeEditorSettings`. Translate the removed inverse flag here
+ * so older snapshots retain their behavior on every incremental update path.
+ */
+function migrateLegacyFilterEditorExpansionPatch(partial: Partial<EditorSettings>): Partial<EditorSettings> {
+  const patch = partial as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown };
+  const { dataGridAutoHideFilterBuilder: legacyAutoHide, ...current } = patch;
+  if (Object.prototype.hasOwnProperty.call(patch, "dataGridKeepFilterEditorExpanded") || typeof legacyAutoHide !== "boolean") {
+    return current;
+  }
+  return { ...current, dataGridKeepFilterEditorExpanded: !legacyAutoHide };
 }
 
 function loadLegacyEditorSettings(): EditorSettings | null {
@@ -1591,6 +1892,10 @@ export const useSettingsStore = defineStore("settings", () => {
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
   const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const defaultAiMode = ref<AiAssistantMode>("ask");
+  // Opt-in (#9118): new conversations land on the `auto` picker entry only when
+  // the user turned the default on in Settings > AI.
+  const defaultAutoRouting = ref(false);
+  const restoreLastConversation = ref(false);
   // Per-db_type prompt template defaults (explicit opt-in) and last-used
   // fallback; both resolved when an AI panel mounts or its namespace changes.
   const aiDefaultTemplatesByDbType = ref<Record<string, string[]>>({});
@@ -1614,6 +1919,25 @@ export const useSettingsStore = defineStore("settings", () => {
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+  let persistedAlwaysOnTopToolbarVisibility = editorSettings.value.toolbarItems.alwaysOnTop;
+
+  function syncAlwaysOnTopToolbarVisibility(visible: boolean) {
+    editorSettings.value.toolbarItems.alwaysOnTop = visible;
+    persistedAlwaysOnTopToolbarVisibility = visible;
+  }
+
+  // Whether the editor-settings blob loaded from disk actually carried a global
+  // timeout value. A normalized number is not enough to tell a user's saved
+  // choice apart from the built-in default filled in by normalizeEditorSettings,
+  // and the timeout-inheritance migration relies on that distinction: a persisted
+  // value must win over the localStorage backup, while a value that was never on
+  // disk (a downgrade, where the older build predated the setting) is recovered
+  // from the backup. Tracked here at load time and read by the migration.
+  const persistedGlobalTimeoutScopes = ref({ connect: false, query: false });
+
+  function hasPersistedGlobalTimeout(scope: "connect" | "query"): boolean {
+    return persistedGlobalTimeoutScopes.value[scope];
+  }
 
   function enqueueEditorSettingsOperation<T>(operation: () => Promise<T>): Promise<T> {
     const queuedOperation = editorSettingsOperationQueue ? editorSettingsOperationQueue.then(operation) : operation();
@@ -1628,8 +1952,14 @@ export const useSettingsStore = defineStore("settings", () => {
     return queuedOperation;
   }
 
-  function persistCurrentEditorSettings(): Promise<void> {
-    return api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+  async function persistCurrentEditorSettings(): Promise<void> {
+    const snapshot = editorSettingsSnapshot(editorSettings.value);
+    await api.saveEditorSettings(snapshot);
+    const visible = snapshot.toolbarItems.alwaysOnTop;
+    if (visible !== persistedAlwaysOnTopToolbarVisibility) {
+      persistedAlwaysOnTopToolbarVisibility = visible;
+      await emitAlwaysOnTopToolbarVisibilityChanged(visible);
+    }
   }
 
   function enqueueEditorSettingsSave(): Promise<void> {
@@ -1679,11 +2009,24 @@ export const useSettingsStore = defineStore("settings", () => {
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
           const savedSettings = saved as Partial<EditorSettings>;
           const normalized = normalizeEditorSettings(savedSettings);
+          const needsSidebarBrowseObjectsMigration = typeof savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion !== "number" || savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion < SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+          if (needsSidebarBrowseObjectsMigration) {
+            // Before this migration, a false value still preserved double-click browsing.
+            normalized.sidebarBrowseObjectsOnDatabaseActivation = true;
+            normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+          }
           editorSettings.value = normalized;
+          persistedAlwaysOnTopToolbarVisibility = normalized.toolbarItems.alwaysOnTop;
+          persistedGlobalTimeoutScopes.value = {
+            connect: typeof savedSettings.globalConnectTimeoutSecs === "number",
+            query: typeof savedSettings.globalQueryTimeoutSecs === "number" || typeof (savedSettings as { queryTimeoutSecs?: unknown }).queryTimeoutSecs === "number",
+          };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
+          const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
+          const needsDataGridExtractorOptionsMigration = (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && savedNullText === "NULL";
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsTabNavigationShortcutMigration) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
@@ -1694,6 +2037,7 @@ export const useSettingsStore = defineStore("settings", () => {
         const legacy = loadLegacyEditorSettings();
         if (legacy) {
           editorSettings.value = legacy;
+          persistedAlwaysOnTopToolbarVisibility = legacy.toolbarItems.alwaysOnTop;
           try {
             await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
@@ -1757,8 +2101,10 @@ export const useSettingsStore = defineStore("settings", () => {
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         allowedConnectionIds: next.allowedConnectionIds,
+        allowedGroupIds: next.allowedGroupIds,
         allowedToolNames: next.allowedToolNames,
         connectionPolicies: next.connectionPolicies,
+        groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
       });
     } catch (error) {
@@ -1784,6 +2130,8 @@ export const useSettingsStore = defineStore("settings", () => {
     const savedSelection = await api.loadAiChatSelection().catch(() => null);
     effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
     defaultAiMode.value = savedSelection?.defaultMode ?? "ask";
+    defaultAutoRouting.value = savedSelection?.defaultAutoRouting ?? false;
+    restoreLastConversation.value = savedSelection?.restoreLastConversation ?? false;
     aiDefaultTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.defaultTemplatesByDbType);
     aiLastUsedTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.lastUsedTemplatesByDbType);
 
@@ -1924,6 +2272,18 @@ export const useSettingsStore = defineStore("settings", () => {
     persistAiChatSelection();
   }
 
+  function setDefaultAutoRouting(value: boolean) {
+    if (value === defaultAutoRouting.value) return;
+    defaultAutoRouting.value = value;
+    persistAiChatSelection();
+  }
+
+  function setRestoreLastConversation(value: boolean) {
+    if (value === restoreLastConversation.value) return;
+    restoreLastConversation.value = value;
+    persistAiChatSelection();
+  }
+
   /** Empty id list clears the db_type entry so unsetting a default is expressible. */
   function setDefaultTemplatesForDbType(dbType: string, templateIds: string[]) {
     if (!dbType) return;
@@ -1984,6 +2344,8 @@ export const useSettingsStore = defineStore("settings", () => {
         selection: { ...preference.selection },
       })),
       defaultMode: defaultAiMode.value,
+      defaultAutoRouting: defaultAutoRouting.value,
+      restoreLastConversation: restoreLastConversation.value,
       // Match the backend's skip_serializing_if(empty): omit the per-db_type
       // records entirely while nothing is configured so the payload stays
       // identical to the pre-defaults format for users without template picks.
@@ -2031,6 +2393,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
+    if (partial.backgroundImage !== undefined) editorSettings.value.backgroundImage = normalizeBackgroundImageSettings(partial.backgroundImage);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
     if (partial.customThemeColors !== undefined) {
       editorSettings.value.customThemeColors = {
@@ -2054,6 +2417,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
     if (partial.executeAllOnBlankLine !== undefined) editorSettings.value.executeAllOnBlankLine = partial.executeAllOnBlankLine === true;
+    if (partial.blockDangerousRedisCommands !== undefined) editorSettings.value.blockDangerousRedisCommands = partial.blockDangerousRedisCommands === true;
     if (partial.globalConnectTimeoutSecs !== undefined) editorSettings.value.globalConnectTimeoutSecs = normalizeGlobalConnectTimeoutSecs(partial.globalConnectTimeoutSecs);
     if (partial.connectTimeoutInheritConnectionIds !== undefined) {
       editorSettings.value.connectTimeoutInheritConnectionIds = [...new Set(partial.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
@@ -2070,10 +2434,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
+    if (partial.sqlServerSpaceConfirmsCompletion !== undefined) editorSettings.value.sqlServerSpaceConfirmsCompletion = partial.sqlServerSpaceConfirmsCompletion === true;
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
+    if (partial.showWhitespace !== undefined) editorSettings.value.showWhitespace = partial.showWhitespace === true;
     if (partial.tableDdlWordWrap !== undefined) editorSettings.value.tableDdlWordWrap = partial.tableDdlWordWrap === true;
+    if (partial.excludeDdlStorage !== undefined) editorSettings.value.excludeDdlStorage = partial.excludeDdlStorage === true;
     if (partial.refreshDdlOnOpen !== undefined) editorSettings.value.refreshDdlOnOpen = partial.refreshDdlOnOpen === true;
     if (partial.vimModeEnabled !== undefined) editorSettings.value.vimModeEnabled = partial.vimModeEnabled === true;
     if (partial.autoCloseBrackets !== undefined) editorSettings.value.autoCloseBrackets = partial.autoCloseBrackets === true;
@@ -2095,8 +2462,12 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
+    if (partial.tableOpenSortMode !== undefined) editorSettings.value.tableOpenSortMode = partial.tableOpenSortMode === "database" || partial.tableOpenSortMode === "local" ? partial.tableOpenSortMode : "none";
+    if (partial.tableDatabaseSortDirection !== undefined) editorSettings.value.tableDatabaseSortDirection = partial.tableDatabaseSortDirection === "desc" ? "desc" : "asc";
+    if (partial.tableLocalSortDirection !== undefined) editorSettings.value.tableLocalSortDirection = partial.tableLocalSortDirection === "desc" ? "desc" : "asc";
     if (partial.queryResultMaxRowsEnabled !== undefined) editorSettings.value.queryResultMaxRowsEnabled = Boolean(partial.queryResultMaxRowsEnabled);
     if (partial.queryResultMaxRows !== undefined) editorSettings.value.queryResultMaxRows = normalizeQueryResultMaxRows(partial.queryResultMaxRows, editorSettings.value.queryResultMaxRows);
+    if (partial.externalSqlEditorMaxMb !== undefined) editorSettings.value.externalSqlEditorMaxMb = normalizeExternalSqlEditorMaxMb(partial.externalSqlEditorMaxMb);
     if (partial.infiniteScroll !== undefined) editorSettings.value.infiniteScroll = partial.infiniteScroll;
     if (partial.infiniteScrollMaxRows !== undefined)
       editorSettings.value.infiniteScrollMaxRows = typeof partial.infiniteScrollMaxRows === "number" && partial.infiniteScrollMaxRows >= 1000 && partial.infiniteScrollMaxRows <= 50000 ? Math.round(partial.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows;
@@ -2122,12 +2493,17 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
+    if (partial.dataGridToolbarLayout !== undefined) editorSettings.value.dataGridToolbarLayout = normalizeDataGridToolbarLayout(partial.dataGridToolbarLayout);
+    if (partial.dataGridKeepFilterEditorExpanded !== undefined) editorSettings.value.dataGridKeepFilterEditorExpanded = partial.dataGridKeepFilterEditorExpanded === true;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
+    if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
+    if (partial.dataGridExtractorOptionsMigrationVersion !== undefined) editorSettings.value.dataGridExtractorOptionsMigrationVersion = DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
+    if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
     if (partial.multiStatementDefaultView !== undefined) editorSettings.value.multiStatementDefaultView = normalizeMultiStatementDefaultView(partial.multiStatementDefaultView);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
     if (partial.dataGridCellDetailButtonVisible !== undefined) editorSettings.value.dataGridCellDetailButtonVisible = typeof partial.dataGridCellDetailButtonVisible === "boolean" ? partial.dataGridCellDetailButtonVisible : DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
@@ -2140,6 +2516,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoActiveTab !== undefined) editorSettings.value.tableInfoActiveTab = normalizeTableInfoTab(partial.tableInfoActiveTab);
+    if (partial.tableInfoDrawerPinned !== undefined) editorSettings.value.tableInfoDrawerPinned = partial.tableInfoDrawerPinned === true;
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
@@ -2158,12 +2535,34 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarBrowseObjectsOnDatabaseActivation !== undefined) editorSettings.value.sidebarBrowseObjectsOnDatabaseActivation = partial.sidebarBrowseObjectsOnDatabaseActivation === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.disconnectTabHandlingMode !== undefined) editorSettings.value.disconnectTabHandlingMode = normalizeDisconnectTabHandlingMode(partial.disconnectTabHandlingMode);
+    if (partial.deleteConnectionTabHandlingMode !== undefined) editorSettings.value.deleteConnectionTabHandlingMode = normalizeDeleteConnectionTabHandlingMode(partial.deleteConnectionTabHandlingMode);
+    if (partial.rememberConnectionDatabaseOnDelete !== undefined) editorSettings.value.rememberConnectionDatabaseOnDelete = partial.rememberConnectionDatabaseOnDelete === true;
+    if (partial.rememberedConnectionDatabases !== undefined) editorSettings.value.rememberedConnectionDatabases = normalizeRememberedConnectionDatabases(partial.rememberedConnectionDatabases);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
+    if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
     if (partial.formatSqlOnSqlFileSave !== undefined) editorSettings.value.formatSqlOnSqlFileSave = partial.formatSqlOnSqlFileSave === true;
-    if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
+    if (partial.updateNotificationsEnabled !== undefined) {
+      editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
+      editorSettings.value.autoUpdateApp = partial.updateNotificationsEnabled;
+      editorSettings.value.autoDownloadUpdates = partial.updateNotificationsEnabled;
+    }
+    if (partial.autoUpdateApp !== undefined) {
+      editorSettings.value.autoUpdateApp = partial.autoUpdateApp;
+      editorSettings.value.updateNotificationsEnabled = partial.autoUpdateApp;
+      editorSettings.value.autoDownloadUpdates = partial.autoUpdateApp;
+    }
+    if (partial.autoDownloadUpdates !== undefined) {
+      editorSettings.value.autoDownloadUpdates = partial.autoDownloadUpdates === true;
+      editorSettings.value.autoUpdateApp = partial.autoDownloadUpdates === true;
+      editorSettings.value.updateNotificationsEnabled = partial.autoDownloadUpdates === true;
+    }
+    if (partial.autoUpdateDrivers !== undefined) editorSettings.value.autoUpdateDrivers = partial.autoUpdateDrivers;
+    if (partial.autoUpdateJdbc !== undefined) editorSettings.value.autoUpdateJdbc = partial.autoUpdateJdbc;
+    if (partial.autoUpdateMcp !== undefined) editorSettings.value.autoUpdateMcp = partial.autoUpdateMcp;
+    if (partial.autoUpdatePlugins !== undefined) editorSettings.value.autoUpdatePlugins = partial.autoUpdatePlugins;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
     if (partial.sidebarCopyTableNameSeparator !== undefined) editorSettings.value.sidebarCopyTableNameSeparator = normalizeSidebarCopyTableNameSeparator(partial.sidebarCopyTableNameSeparator);
     if (partial.sidebarCopyTableNameIncludeSchema !== undefined) editorSettings.value.sidebarCopyTableNameIncludeSchema = partial.sidebarCopyTableNameIncludeSchema === true;
@@ -2184,6 +2583,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
     if (partial.csvQuoteMode !== undefined) editorSettings.value.csvQuoteMode = normalizeCsvQuoteMode(partial.csvQuoteMode);
     if (partial.redisKeyTemplates !== undefined) editorSettings.value.redisKeyTemplates = normalizeRedisKeyTemplates(partial.redisKeyTemplates);
+    if (partial.redisDatabaseDisplayLimit !== undefined) editorSettings.value.redisDatabaseDisplayLimit = Math.min(REDIS_DATABASE_DISPLAY_LIMIT_MAX, Math.max(REDIS_DATABASE_DISPLAY_LIMIT_MIN, Math.round(partial.redisDatabaseDisplayLimit)));
     if (partial.exportRowLimitEnabled !== undefined) editorSettings.value.exportRowLimitEnabled = partial.exportRowLimitEnabled;
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;
@@ -2196,17 +2596,21 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlVariableSyntaxOverrides !== undefined) editorSettings.value.sqlVariableSyntaxOverrides = normalizeSqlVariableSyntaxOverrides(partial.sqlVariableSyntaxOverrides);
     if (partial.continueOnErrorOnBatch !== undefined) editorSettings.value.continueOnErrorOnBatch = partial.continueOnErrorOnBatch === true;
     if (partial.showTableDdlHoverPreview !== undefined) editorSettings.value.showTableDdlHoverPreview = partial.showTableDdlHoverPreview === true;
+    if (partial.tableHoverLookupMode !== undefined) editorSettings.value.tableHoverLookupMode = normalizeTableHoverLookupMode(partial.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode);
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);
+    if (partial.keepExplicitTransactionInAutoCommit !== undefined) editorSettings.value.keepExplicitTransactionInAutoCommit = partial.keepExplicitTransactionInAutoCommit === true;
     if (partial.flatteningMultiLineText !== undefined) editorSettings.value.flatteningMultiLineText = partial.flatteningMultiLineText;
+    if (partial.dataGridShowWhitespace !== undefined) editorSettings.value.dataGridShowWhitespace = partial.dataGridShowWhitespace;
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
-    applyEditorSettingsPatch(partial);
-    markEditorSettingsPatch(partial);
+    const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+    applyEditorSettingsPatch(patch);
+    markEditorSettingsPatch(patch);
     if (!isEditorSettingsLoaded.value) {
-      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
+      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(patch));
       return;
     }
     saveEditorSettings();
@@ -2226,16 +2630,17 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueEditorSettingsAtomicMutation(async () => {
       await initEditorSettings();
       const previous = editorSettingsSnapshot(editorSettings.value);
-      applyEditorSettingsPatch(partial);
-      const revision = markEditorSettingsPatch(partial);
+      const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+      applyEditorSettingsPatch(patch);
+      const revision = markEditorSettingsPatch(patch);
       try {
         await persistCurrentEditorSettings();
       } catch (error) {
         const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
         const previousSettings = previous as unknown as Record<string, unknown>;
         let changed = false;
-        for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
-          if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+        for (const key of Object.keys(patch) as (keyof EditorSettings)[]) {
+          if (patch[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
           restored[key] = previousSettings[key];
           editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
           changed = true;
@@ -2244,6 +2649,46 @@ export const useSettingsStore = defineStore("settings", () => {
         throw error;
       }
     });
+  }
+
+  /**
+   * 批量记住「连接名 → 数据库名 + 类型」；数据库名或类型为空表示清除该条目。
+   * 删除连接时写入，新建同名同类型连接时回填。整体只触发一次设置落盘。
+   */
+  function rememberConnectionDatabases(entries: Iterable<readonly [string, string | undefined, string | undefined]>) {
+    const next = { ...editorSettings.value.rememberedConnectionDatabases };
+    let changed = false;
+    for (const [connectionName, database, dbType] of entries) {
+      const name = connectionName.trim();
+      const value = database?.trim();
+      if (!name || !value || !dbType) {
+        if (name && name in next) {
+          delete next[name];
+          changed = true;
+        }
+        continue;
+      }
+      const previous = next[name];
+      if (previous?.database === value && previous.dbType === dbType) continue;
+      // 重新插入以刷新写入顺序，让上限裁剪优先淘汰最旧的条目。
+      delete next[name];
+      next[name] = { database: value, dbType };
+      changed = true;
+    }
+    if (!changed) return;
+    updateEditorSettings({ rememberedConnectionDatabases: next });
+  }
+
+  /** 只在连接名与数据库类型都匹配时返回记住的数据库；类型不同视为无关记录。 */
+  function rememberedDatabaseForConnection(connectionName: string, dbType: string): string {
+    const name = connectionName.trim();
+    if (!name || !dbType) return "";
+    const entry = editorSettings.value.rememberedConnectionDatabases[name];
+    return entry && entry.dbType === dbType ? entry.database : "";
+  }
+
+  function clearRememberedConnectionDatabases() {
+    updateEditorSettings({ rememberedConnectionDatabases: {} });
   }
 
   function updateColumnFormatter(key: string, formatter: ColumnFormatterConfig | undefined) {
@@ -2363,6 +2808,10 @@ export const useSettingsStore = defineStore("settings", () => {
     activeEffort,
     defaultAiMode,
     setDefaultAiMode,
+    defaultAutoRouting,
+    setDefaultAutoRouting,
+    restoreLastConversation,
+    setRestoreLastConversation,
     aiDefaultTemplatesByDbType,
     aiLastUsedTemplatesByDbType,
     setDefaultTemplatesForDbType,
@@ -2382,9 +2831,11 @@ export const useSettingsStore = defineStore("settings", () => {
     isConfigured,
     isEditorSettingsLoaded,
     editorSettings,
+    hasPersistedGlobalTimeout,
     desktopSettings,
     mcpGlobalPolicy,
     initEditorSettings,
+    syncAlwaysOnTopToolbarVisibility,
     updateEditorSettings,
     updateEditorSettingsAndPersist,
     persistEditorSettings,
@@ -2393,6 +2844,9 @@ export const useSettingsStore = defineStore("settings", () => {
     initMcpGlobalPolicy,
     updateMcpGlobalPolicy,
     updateColumnFormatter,
+    rememberConnectionDatabases,
+    rememberedDatabaseForConnection,
+    clearRememberedConnectionDatabases,
     customColumnFormatterDeleteVersion,
     upsertCustomColumnFormatter,
     deleteCustomColumnFormatter,

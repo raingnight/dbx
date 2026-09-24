@@ -24,10 +24,12 @@ import {
   requiredImportTargetColumns,
   resolveTableImportElapsed,
   suggestImportTargetDataTypes,
+  TABLE_IMPORT_ENCODING_OPTIONS,
   tableImportProgressPercent,
   validateImportMappings,
   type TableImportWizardStep,
 } from "@/lib/table/tableImport";
+import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
@@ -51,6 +53,7 @@ type ImportSource = string | File;
 
 interface BatchImportTask {
   id: string;
+  selected: boolean;
   source: ImportSource;
   format: api.TableImportSourceFormat;
   sheetName: string;
@@ -64,6 +67,25 @@ interface BatchImportTask {
 }
 
 const SKIP_VALUE = "__skip__";
+const TARGET_COLUMNS_TIMEOUT_MS = 15000;
+const TARGET_COLUMNS_TIMEOUT = Symbol("target-columns-timeout");
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(TARGET_COLUMNS_TIMEOUT), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 const targetColumns = ref<ColumnInfo[]>([]);
 const loadedTargetTableName = ref("");
 const existingTableNames = ref<string[]>([]);
@@ -120,13 +142,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
 ];
 
-const encodingOptions: Array<{ value: api.TableImportTextEncoding; labelKey: string }> = [
-  { value: "auto", labelKey: "tableImport.encodingAuto" },
-  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
-  { value: "gbk", labelKey: "tableImport.encodingGbk" },
-  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
-  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
-];
+const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
 
 const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
   { value: "source", labelKey: "tableImport.stepSource" },
@@ -167,12 +183,16 @@ const requiredUnmappedColumns = computed(() =>
   ),
 );
 const isBatchImport = computed(() => targetMode.value === "create" && batchTasks.value.length > 1);
+const selectedBatchTasks = computed(() => batchTasks.value.filter((task) => task.selected));
+const batchTargetNamesValid = computed(() => {
+  const tableNames = selectedBatchTasks.value.map((task) => task.tableName.trim().toLowerCase());
+  return tableNames.length > 0 && tableNames.every(Boolean) && new Set(tableNames).size === tableNames.length;
+});
 const canImport = computed(() => {
   if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
-  const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
-  if (new Set(tableNames).size !== tableNames.length) return false;
-  return batchTasks.value.every((task) => {
+  if (!batchTargetNamesValid.value) return false;
+  return selectedBatchTasks.value.every((task) => {
     const mappings = task.preview.columns.map((sourceColumn) => ({ sourceColumn, targetColumn: task.columnMapping[sourceColumn] ?? "", targetDataType: task.columnDataTypes[sourceColumn] ?? "" })).filter((mapping) => mapping.targetColumn);
     return !!task.tableName.trim() && validateImportMappings(mappings).valid;
   });
@@ -180,6 +200,10 @@ const canImport = computed(() => {
 const canGoBack = computed(() => wizardStep.value !== "source" && wizardStep.value !== "execution" && !running.value);
 const canGoNext = computed(() => {
   if (wizardStep.value === "source") return !!selectedSource.value && !!sourceFormat.value;
+  if (isBatchImport.value) {
+    if (wizardStep.value === "options") return batchTargetNamesValid.value;
+    if (wizardStep.value === "mapping") return canImport.value;
+  }
   if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
   if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
@@ -312,7 +336,7 @@ function suggestedTableName(name: string) {
 }
 
 function sourceName(source: ImportSource): string {
-  return typeof source === "string" ? source.split(/[\\/]/).pop() || source : source.name;
+  return importSourceDisplayName(source);
 }
 
 function uniqueTableName(baseName: string, usedNames: Set<string>): string {
@@ -519,7 +543,7 @@ async function loadTargetColumns() {
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    const columns = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName);
+    const columns = await withTimeout(api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName), TARGET_COLUMNS_TIMEOUT_MS);
     if (requestId !== targetColumnsRequestId) return;
     targetColumns.value = columns;
     loadedTargetTableName.value = tableName;
@@ -529,7 +553,7 @@ async function loadTargetColumns() {
       targetColumns.value = [];
       loadedTargetTableName.value = "";
       columnMapping.value = {};
-      errorMessage.value = String(e?.message || e);
+      errorMessage.value = e === TARGET_COLUMNS_TIMEOUT ? t("tableImport.targetColumnsTimeout") : String(e?.message || e);
     }
   } finally {
     if (requestId === targetColumnsRequestId) loadingTarget.value = false;
@@ -537,9 +561,9 @@ async function loadTargetColumns() {
 }
 
 async function previewSelectedImportFile(fileOrPath: string | File) {
-  const reusablePreview = preview.value?.sourceRef ? preview.value : null;
-  return api.previewTableImportFile(reusablePreview?.filePath || fileOrPath, {
-    sourceRef: reusablePreview?.sourceRef || null,
+  const input = importPreviewInput(uploadedImportSourceFromPreview(preview.value), fileOrPath);
+  return api.previewTableImportFile(input.fileOrPath, {
+    sourceRef: input.sourceRef,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
     previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -629,11 +653,11 @@ async function prepareBatchSources(sources: ImportSource[]) {
       });
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
-        const reusableSource = initialPreview.sourceRef ? initialPreview.filePath : source;
+        const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
         const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
         const taskPreview = effectiveSheetName
-          ? await api.previewTableImportFile(reusableSource, {
-              sourceRef: initialPreview.sourceRef || null,
+          ? await api.previewTableImportFile(input.fileOrPath, {
+              sourceRef: input.sourceRef,
               sourceFormat: format,
               parseOptions: taskParseOptions(format, effectiveSheetName),
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -642,6 +666,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
+          selected: true,
           source,
           format,
           sheetName: effectiveSheetName,
@@ -727,6 +752,10 @@ function canOpenStep(step: TableImportWizardStep) {
   if (running.value || step === "execution") return false;
   if (step === "source") return true;
   if (step === "options") return !!selectedSource.value;
+  if (isBatchImport.value) {
+    if (step === "mapping") return selectedBatchTasks.value.length > 0;
+    if (step === "review") return canImport.value;
+  }
   if (step === "mapping") return !!preview.value && existingTargetMetadataReady.value;
   if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
@@ -770,6 +799,7 @@ async function goNext() {
 
 async function startImport() {
   saveActiveBatchTask();
+  if (!canImport.value) return;
   if (!(await ensureReadOnlyWriteAccess({ connection: store.getConfig(props.prefillConnectionId ?? ""), source: t("readOnlyUnlock.sourceImport"), treatAsMutation: true }))) {
     return;
   }
@@ -851,15 +881,18 @@ async function startImport() {
 }
 
 async function startBatchImport() {
-  if (!props.prefillConnectionId || !batchTasks.value.length || running.value) return;
+  if (!props.prefillConnectionId || !canImport.value) return;
+  // Keep original indices for the active preview and error state, even when
+  // the import queue excludes worksheets between selected tasks.
+  const tasks = batchTasks.value.map((task, index) => ({ task, index })).filter(({ task }) => task.selected);
   running.value = true;
   progressPercentFloor.value = 0;
   cancelling.value = false;
   errorMessage.value = "";
   wizardStep.value = "execution";
-  const totalRowsExact = batchTasks.value.every((task) => task.preview.totalRowsExact !== false);
-  const totalRows = totalRowsExact ? batchTasks.value.reduce((sum, task) => sum + task.preview.totalRows, 0) : 0;
-  const totalBytes = batchTasks.value.reduce((sum, task) => sum + task.preview.sizeBytes, 0);
+  const totalRowsExact = tasks.every(({ task }) => task.preview.totalRowsExact !== false);
+  const totalRows = totalRowsExact ? tasks.reduce((sum, { task }) => sum + task.preview.totalRows, 0) : 0;
+  const totalBytes = tasks.reduce((sum, { task }) => sum + task.preview.sizeBytes, 0);
   let completedRows = 0;
   let completedBytes = 0;
   importId.value = uuid();
@@ -867,10 +900,9 @@ async function startBatchImport() {
   progress.value = { importId: importId.value, status: "running", phase: "preparing", rowsImported: 0, totalRows, totalRowsExact, bytesRead: 0, totalBytes, elapsedMs: 0 };
 
   try {
-    const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
+    const tableNames = tasks.map(({ task }) => task.tableName.trim().toLowerCase());
     if (new Set(tableNames).size !== tableNames.length) throw new Error("Target table names must be unique");
-    for (let index = 0; index < batchTasks.value.length; index++) {
-      const task = batchTasks.value[index];
+    for (const [queueIndex, { task, index }] of tasks.entries()) {
       activeTaskIndex.value = index;
       task.status = "running";
       importId.value = uuid();
@@ -907,7 +939,7 @@ async function startBatchImport() {
         },
         (nextProgress) => {
           task.rowsImported = nextProgress.rowsImported;
-          const hasRemainingTasks = index < batchTasks.value.length - 1;
+          const hasRemainingTasks = queueIndex < tasks.length - 1;
           const aggregateStatus = nextProgress.status === "done" && hasRemainingTasks ? "running" : nextProgress.status;
           const aggregatePhase = nextProgress.status === "done" && hasRemainingTasks ? "preparing" : nextProgress.phase;
           progress.value = {
@@ -1006,9 +1038,9 @@ async function reloadBatchPreviewsForEncoding() {
     for (const task of batchTasks.value) {
       // SQL 脚本同样是文本源，编码变化时需要重新预览
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
-      const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
-      const nextPreview = await api.previewTableImportFile(reusableSource, {
-        sourceRef: task.preview.sourceRef || null,
+      const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
+      const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
+        sourceRef: input.sourceRef,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -1107,30 +1139,31 @@ watch(rawProgressPercent, (percent) => {
 
         <div v-if="isBatchImport" class="rounded-md border">
           <div class="flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
-            <span>{{ batchTasks.length }} {{ t("tableImport.file") }}</span>
+            <span>{{ t("tableImport.selectedTasks", { selected: selectedBatchTasks.length, total: batchTasks.length }) }}</span>
             <span class="text-muted-foreground">{{ selectedSourceName }}</span>
           </div>
           <div class="flex max-h-32 flex-wrap gap-1.5 overflow-auto p-2">
-            <button
-              v-for="(task, index) in batchTasks"
-              :key="task.id"
-              type="button"
-              class="flex max-w-[260px] items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors"
-              :class="index === activeTaskIndex ? 'border-primary bg-primary/10 text-primary' : 'hover:bg-muted/60'"
-              :disabled="running"
-              @click="
-                saveActiveBatchTask();
-                activateBatchTask(index);
-              "
-            >
-              <CheckCircle2 v-if="task.status === 'done'" class="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-              <Loader2 v-else-if="task.status === 'running'" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-              <AlertTriangle v-else-if="task.status === 'error'" class="h-3.5 w-3.5 shrink-0 text-destructive" />
-              <FileSpreadsheet v-else-if="task.format === 'excel'" class="h-3.5 w-3.5 shrink-0" />
-              <FileText v-else class="h-3.5 w-3.5 shrink-0" />
-              <span class="truncate">{{ task.tableName }}</span>
-            </button>
+            <div v-for="(task, index) in batchTasks" :key="task.id" class="flex max-w-[260px] items-center gap-1.5 rounded-md border pl-2 text-xs transition-colors" :class="index === activeTaskIndex ? 'border-primary bg-primary/10 text-primary' : 'hover:bg-muted/60'">
+              <input v-model="task.selected" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-primary" :aria-label="t('tableImport.selectTask', { name: task.tableName })" :disabled="running" />
+              <button
+                type="button"
+                class="flex min-w-0 items-center gap-1.5 py-1 pr-2"
+                :disabled="running"
+                @click="
+                  saveActiveBatchTask();
+                  activateBatchTask(index);
+                "
+              >
+                <CheckCircle2 v-if="task.status === 'done'" class="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                <Loader2 v-else-if="task.status === 'running'" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                <AlertTriangle v-else-if="task.status === 'error'" class="h-3.5 w-3.5 shrink-0 text-destructive" />
+                <FileSpreadsheet v-else-if="task.format === 'excel'" class="h-3.5 w-3.5 shrink-0" />
+                <FileText v-else class="h-3.5 w-3.5 shrink-0" />
+                <span class="truncate">{{ task.tableName }}</span>
+              </button>
+            </div>
           </div>
+          <p v-if="!selectedBatchTasks.length" class="px-3 pb-2 text-xs text-muted-foreground">{{ t("tableImport.noTasksSelected") }}</p>
         </div>
 
         <nav class="rounded-md border bg-muted/20 px-3 py-2" :aria-label="t('tableImport.progress')">
@@ -1318,7 +1351,8 @@ watch(rawProgressPercent, (percent) => {
           <div v-else-if="sourceFormat === 'excel'" class="grid grid-cols-4 gap-3 rounded-md border p-3">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.sheet") }}</Label>
-              <Select :model-value="selectedSheet" :disabled="!preview?.sheets?.length" @update:model-value="(value: any) => (selectedSheet = value)">
+              <Input v-if="isBatchImport" :model-value="selectedSheet || preview?.sheets?.[0] || t('tableImport.firstSheet')" :aria-label="t('tableImport.sheet')" readonly class="h-8 text-xs" />
+              <Select v-else :model-value="selectedSheet" :disabled="!preview?.sheets?.length" @update:model-value="(value: any) => (selectedSheet = value)">
                 <SelectTrigger class="h-8 text-xs">
                   <SelectValue :placeholder="t('tableImport.firstSheet')" />
                 </SelectTrigger>
@@ -1555,8 +1589,11 @@ watch(rawProgressPercent, (percent) => {
           <Loader2 class="h-3.5 w-3.5 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div v-if="errorMessage && wizardStep !== 'execution'" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {{ errorMessage }}
+        <div v-if="errorMessage && wizardStep !== 'execution'" class="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <span class="flex-1">{{ errorMessage }}</span>
+          <Button v-if="targetMode === 'existing' && !loadingTarget && !existingTargetMetadataReady" variant="outline" size="sm" class="h-6 px-2 text-xs" @click="loadTargetColumns()">
+            {{ t("tableImport.retry") }}
+          </Button>
         </div>
       </div>
 

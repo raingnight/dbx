@@ -121,6 +121,25 @@ struct CapturingBackend {
 
 #[async_trait]
 impl DbxBackend for CapturingBackend {
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(json!({"connection":connection.id, "topic":topic.topic, "count":count, "options":options}));
+        Ok(dbx_core::mq::PeekMessagesResult::complete(vec![dbx_core::mq::PeekedMessage {
+            payload_base64: "aGk=".into(),
+            payload_text: Some("hi".into()),
+            ..Default::default()
+        }]))
+    }
+
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         Ok(self.policy.clone())
     }
@@ -230,6 +249,30 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
     );
 }
 
+/// The client-facing field is `max_rows`. Only this rmcp-level test proves the
+/// published name survives tool-call serialization and that clamping happens at
+/// the native boundary; the in-process tests assert the internal `limit`
+/// argument directly and cannot catch a name mismatch.
+#[tokio::test]
+async fn execute_query_forwards_client_max_rows() {
+    let cases = [
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1" }), 100_u64),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 500 }), 500),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 100000 }), 1000),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 0 }), 1),
+    ];
+    for (request, expected) in cases {
+        let backend = Arc::new(CapturingBackend {
+            policy: McpGlobalPolicy::default(),
+            connections: vec![test_connection("scoped", "shared-db")],
+            calls: Mutex::new(Vec::new()),
+        });
+        let captured = captured_query_arguments(backend, request.clone()).await;
+        assert_eq!(captured.len(), 1, "expected one captured execute_query call");
+        assert_eq!(captured[0]["limit"], json!(expected), "max_rows in {request} must map to limit");
+    }
+}
+
 fn test_connection(id: &str, name: &str) -> ConnectionConfig {
     serde_json::from_value(json!({
         "id": id,
@@ -285,15 +328,25 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 22);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 20);
+    #[cfg(feature = "mq-admin")]
+    assert!(names.contains(&"dbx_peek_messages"));
+    #[cfg(not(feature = "mq-admin"))]
+    assert!(!names.contains(&"dbx_peek_messages"));
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
+    assert!(names.contains(&"dbx_execute_batch"));
+    assert!(names.contains(&"dbx_list_routines"));
+    assert!(names.contains(&"dbx_get_routine_source"));
     assert!(names.contains(&"dbx_open_session"));
+    assert!(names.contains(&"dbx_begin_transaction"));
+    assert!(names.contains(&"dbx_commit_transaction"));
+    assert!(names.contains(&"dbx_rollback_transaction"));
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_send_message"));
@@ -304,6 +357,51 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
+}
+
+#[cfg(feature = "mq-admin")]
+#[tokio::test]
+async fn kafka_peek_round_trips_over_mcp_in_local_and_web_modes() {
+    let mut connection = test_connection("kafka", "Kafka");
+    connection.db_type = dbx_core::models::connection::DatabaseType::MessageQueue;
+    connection.read_only = true;
+    connection.is_production = true;
+    connection.external_config = Some(json!({"systemKind":"kafka", "adminUrl":"", "auth":{"kind":"none"}}));
+    for web_mode in [false, true] {
+        let backend = Arc::new(CapturingBackend {
+            policy: McpGlobalPolicy::default(),
+            connections: vec![connection.clone()],
+            calls: Mutex::new(vec![]),
+        });
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), web_mode);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.unwrap();
+        let result = client.peer().call_tool(CallToolRequestParams::new("dbx_peek_messages").with_arguments(json!({"connection_name":"Kafka", "topic":"events", "count":100, "start_position":"offset", "partition":0, "offset":120}).as_object().unwrap().clone())).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let body: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(body["messages"][0]["payloadText"], "hi");
+        assert_eq!(body["incomplete"], false);
+        assert_eq!(
+            backend.calls.lock().unwrap()[0],
+            json!({"connection":"kafka", "topic":"events", "count":100, "options":{"startPosition":"offset", "partition":0, "offset":120}})
+        );
+        let invalid = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("dbx_peek_messages").with_arguments(
+                    json!({"connection_id":"kafka", "topic":"events", "start_position":"invalid"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await;
+        assert!(invalid.is_err() || invalid.unwrap().is_error == Some(true));
+        assert_eq!(backend.calls.lock().unwrap().len(), 1);
+        client.cancel().await.unwrap();
+        server_task.abort();
+    }
 }
 
 #[tokio::test]

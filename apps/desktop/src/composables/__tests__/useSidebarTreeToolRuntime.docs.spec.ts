@@ -10,6 +10,9 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
     docsSource: null as unknown,
     diagramSource: null as unknown,
     databaseExportSource: null as unknown,
+    mongoImportSource: undefined as unknown,
+    mongoDatabaseDumpSource: null as unknown,
+    schemaDiffSource: null as unknown,
     treeNodes: options.treeNodes ?? [],
     selectedTreeNodeIds: options.selectedTreeNodeIds ?? [],
   };
@@ -104,6 +107,72 @@ describe("useSidebarTreeToolRuntime diagram and database export", () => {
       database: "db",
       schema: "public",
       tableName: "users",
+    });
+  });
+});
+
+describe("useSidebarTreeToolRuntime mongo import", () => {
+  it("opens collection import from a mongo-collection node", () => {
+    const { connectionStore, runtime } = setup({
+      type: "mongo-collection",
+      label: "orders",
+      connectionId: "conn-1",
+      database: "shop",
+    });
+
+    runtime.openMongoImport();
+
+    expect(connectionStore.mongoImportSource).toEqual({
+      connectionId: "conn-1",
+      database: "shop",
+      collection: "orders",
+    });
+  });
+});
+
+describe("useSidebarTreeToolRuntime MongoDB dump and restore", () => {
+  it.each(["dump", "restore"] as const)("opens %s for the selected MongoDB database", (mode) => {
+    const { connectionStore, runtime } = setup({ type: "mongo-db", connectionId: "conn-1", database: "shop" });
+
+    runtime.openMongoDatabaseDump(mode);
+
+    expect(connectionStore.mongoDatabaseDumpSource).toEqual({ connectionId: "conn-1", database: "shop", mode });
+  });
+
+  it.each<Partial<TreeNode>>([
+    { type: "table", connectionId: "conn-1", database: "shop" },
+    { type: "mongo-collection", connectionId: "conn-1", database: "shop" },
+    { type: "mongo-db", database: "shop" },
+    { type: "mongo-db", connectionId: "conn-1" },
+  ])("does not open a database restore from an invalid context: %j", (node) => {
+    const { connectionStore, runtime } = setup(node);
+
+    runtime.openMongoDatabaseDump("restore");
+
+    expect(connectionStore.mongoDatabaseDumpSource).toBeNull();
+  });
+});
+
+describe("useSidebarTreeToolRuntime openSchemaDiffForRoutine", () => {
+  it("prefills schema diff with a signature-aware routine key", () => {
+    const { connectionStore, runtime } = setup({
+      type: "function",
+      label: "add(integer)",
+      objectName: "add",
+      signature: "integer",
+      connectionId: "conn-1",
+      database: "shop",
+      schema: "public",
+    });
+
+    runtime.openSchemaDiffForRoutine();
+
+    expect(connectionStore.schemaDiffSource).toEqual({
+      connectionId: "conn-1",
+      database: "shop",
+      schema: "public",
+      selectedRoutines: ["add(integer)"],
+      preferredResultTab: "routines",
     });
   });
 });

@@ -4,6 +4,12 @@ import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, ty
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
+// @codemirror/lang-sql tags dialect builtin-list words (COUNT, DATE_FORMAT, ...) as
+// standard(name) — not standard(variableName), which is a *child* tag of name and so never
+// matches a token tagged with the parent. Shared so both editor theme builders below stay in
+// sync with what the SQL tokenizer actually emits.
+export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
+
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
@@ -25,7 +31,10 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
 export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
   return EditorView.theme({
     ".cm-sql-table-name, .cm-sql-table-name *": {
-      color: `var(${SQL_TABLE_COLOR_CSS_VAR}) !important`,
+      // Built-in CodeMirror themes do not define the editor-specific table color
+      // variable. Keep semantic table names visible there as well, while custom
+      // and IDE themes continue to use their configured table color.
+      color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
     },
   });
 }
@@ -165,7 +174,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.definition(tags.variableName), color: c.variable },
     { tag: tags.function(tags.variableName), color: c.function },
     { tag: tags.function(tags.propertyName), color: c.function },
-    { tag: tags.standard(tags.variableName), color: c.builtin },
+    { tag: SQL_BUILTIN_HIGHLIGHT_TAG, color: c.builtin },
     { tag: tags.propertyName, color: c.property },
     { tag: tags.operator, color: c.operator },
     { tag: tags.compareOperator, color: c.operator },
@@ -563,7 +572,7 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
     { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
-    { tag: [tags.standard(tags.variableName), tags.special(tags.name)], color: c.builtin },
+    { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },
     { tag: [tags.operator, tags.compareOperator, tags.logicOperator, tags.arithmeticOperator, tags.derefOperator], color: c.operator },
     { tag: [tags.punctuation, tags.separator, tags.paren, tags.brace, tags.bracket, tags.angleBracket], color: c.punctuation },
@@ -621,6 +630,12 @@ const SNIPPET_ICON: LucideIconNode = [
 const FUNCTION_ICON: LucideIconNode = [
   ["path", { d: "m15 10 5 5-5 5" }],
   ["path", { d: "M4 4v7a4 4 0 0 0 4 4h12" }],
+];
+
+const DATABASE_LINK_ICON: LucideIconNode = [
+  ["path", { d: "M9 17H7A5 5 0 0 1 7 7h2" }],
+  ["path", { d: "M15 7h2a5 5 0 0 1 0 10h-2" }],
+  ["path", { d: "M8 12h8" }],
 ];
 
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
@@ -763,6 +778,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ...(opts?.scrollable ? { ".cm-scroller": { overflowX: "auto", overflowY: "auto" } } : {}),
     ".cm-content": {
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
+      // Ligature fonts (Fira Code, Cascadia Code, JetBrains Mono, ...) combine
+      // runs like `--`/`==` into a single shaped glyph. CodeMirror repaints
+      // edited lines by patching individual character spans, and that
+      // per-keystroke patching can race the browser's ligature reshaping when
+      // the same character is typed repeatedly in place, leaving earlier
+      // characters unpainted until something else forces a repaint (dbx#7900).
+      // Disabling ligatures here avoids the reshaping entirely, matching the
+      // same fix already applied to DataGridConditionEditor.vue.
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
       lineHeight: "1.6",
       padding: "0",
     },
@@ -1047,6 +1072,10 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     ".cm-completionIcon-function": {
       color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(FUNCTION_ICON),
+    },
+    ".cm-completionIcon-namespace": {
+      color: colorMixValue("var(--sky-500, #0ea5e9)", "color-mix(in oklch, var(--sky-500, #0ea5e9) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(DATABASE_LINK_ICON),
     },
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, RefreshCw } from "@lucide/vue";
@@ -9,6 +11,7 @@ import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { applyDdlDatabaseQualifier, ddlFormatDialectFor, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -46,7 +49,8 @@ const { toast } = useToast();
 const { isDark, themePalette } = useTheme();
 const settingsStore = useSettingsStore();
 
-const ddlContent = ref("");
+const rawDdlContent = ref("");
+const ddlContent = computed(() => applyDdlStoragePreference(rawDdlContent.value, props.databaseType, settingsStore.editorSettings.excludeDdlStorage));
 const ddlLoading = ref(false);
 const ddlError = ref("");
 const ddlEditorContainer = ref<HTMLDivElement>();
@@ -125,7 +129,10 @@ async function loadDdl(force = false) {
       },
       { force },
     );
-    ddlContent.value = await formatSqlForDisplay(ddl, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
+    const formatDialect = ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect });
+    const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
+    const unqualified = applyDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
+    rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
   } catch (e: any) {
     ddlError.value = e?.message || String(e);
   } finally {
@@ -141,7 +148,7 @@ watch(
     if (!open) return;
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
-    ddlContent.value = "";
+    rawDdlContent.value = "";
     await loadDdl(settingsStore.editorSettings.refreshDdlOnOpen);
   },
   { immediate: true },
@@ -244,6 +251,11 @@ function copyDdlContent() {
   }
 }
 
+watch(ddlContent, (content) => {
+  const view = ddlEditorView.value;
+  if (view) view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: content } });
+});
+
 // When DDL finishes loading, create the editor inside the dialog.
 watch(ddlLoading, (loading) => {
   if (!loading && ddlContent.value && props.open) {
@@ -267,7 +279,7 @@ onUnmounted(() => {
 });
 
 function retry() {
-  ddlContent.value = "";
+  rawDdlContent.value = "";
   void loadDdl(true);
 }
 
@@ -304,6 +316,7 @@ function onClose() {
           <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" />
         </div>
       </div>
+      <DdlStorageToggle :database-type="props.databaseType" :disabled="ddlLoading || !!ddlError" />
       <DialogFooter>
         <div class="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
           <Switch id="ddl-refresh-on-open" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setRefreshDdlOnOpen" />

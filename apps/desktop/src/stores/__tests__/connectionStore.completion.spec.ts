@@ -60,6 +60,19 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function jdbcOracleConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "jdbc-oracle-1",
+    name: "Oracle via JDBC",
+    db_type: "jdbc",
+    port: 1521,
+    username: "APP",
+    database: "ORCL",
+    connection_string: "jdbc:oracle:thin:@127.0.0.1:1521/ORCL",
+  } as ConnectionConfig;
+}
+
 function oceanBaseOracleConnection(): ConnectionConfig {
   return {
     ...oracleConnection(),
@@ -361,7 +374,8 @@ describe("connectionStore completion assistant", () => {
 
     const [first, second] = await Promise.all([store.listCompletionTables("pg-1", "app", "acc", 20, "public"), store.listCompletionTables("pg-1", "app", "acc", 20, "public")]);
 
-    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+    // Both callers share one in-flight prefix lookup plus its widened substring lookup.
+    expect(completionAssistantSearch.mock.calls.map(([request]) => (request as { match_mode?: string }).match_mode)).toEqual(["prefix", "contains"]);
     expect(first).toEqual(second);
     expect(first[0]).toMatchObject({ name: "accounts", schema: "public", type: "table" });
   });
@@ -388,6 +402,85 @@ describe("connectionStore completion assistant", () => {
     expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
     expect(listTables).toHaveBeenCalledWith("pg-1", "app", "public", "acc", 20);
     expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts" }]);
+  });
+
+  it("verifies selected-schema tables when the completion index is stale", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const listTables = vi.fn().mockResolvedValue([{ name: "accounts", table_type: "BASE TABLE", comment: "Customer accounts" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listSchemas: vi.fn().mockResolvedValue(["reporting"]),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const tables = await store.listCompletionTables("pg-1", "app", "accounts", 200, "reporting", false, "reporting", undefined, { verifySchemaMetadata: true });
+
+    expect(completionAssistantSearch.mock.calls.map(([request]) => (request as { match_mode?: string }).match_mode)).toEqual(["prefix", "contains"]);
+    expect(listTables).toHaveBeenCalledWith("pg-1", "app", "reporting", "accounts", 200);
+    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts" }]);
+  });
+
+  it("widens a sparse prefix search with substring matches", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { match_mode?: string }) =>
+      request.match_mode === "contains" ? { candidates: [{ name: "YY_SFXXMK", kind: "view", schema: "public" }], incomplete: false, fallback_used: false } : { candidates: [{ name: "SFXXMK", kind: "table", schema: "public" }], incomplete: false, fallback_used: false },
+    );
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listSchemas: vi.fn().mockResolvedValue(["public"]),
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const tables = await store.listCompletionTables("pg-1", "app", "sfxxm", 200, "public");
+
+    expect(completionAssistantSearch.mock.calls.map(([request]) => (request as { match_mode?: string }).match_mode)).toEqual(["prefix", "contains"]);
+    expect(tables.map((table) => table.name)).toEqual(["SFXXMK", "YY_SFXXMK"]);
+  });
+
+  it("skips the substring lookup when the prefix search fills the result budget or the filter is short", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "accounts", kind: "table", schema: "public" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listSchemas: vi.fn().mockResolvedValue(["public"]),
+      listTables: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await store.listCompletionTables("pg-1", "app", "acc", 1, "public");
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+
+    await store.listCompletionTables("pg-1", "app", "ac", 200, "public");
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
   });
 
   it("keeps schema-qualified local table completion scoped to the selected schema", async () => {
@@ -611,6 +704,36 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
+  });
+
+  it("lets a JDBC connection to Oracle resolve CURRENT_SCHEMA for unqualified column completion, same as the native Oracle driver", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const getColumns = vi.fn().mockResolvedValue([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [jdbcOracleConnection()];
+    store.connectedIds.add("jdbc-oracle-1");
+
+    // No schema is selected (undefined) — before the fix this fell through
+    // both the Oracle current-schema completion path and the schema-required
+    // guard, silently returning [] without ever calling getColumns.
+    const columns = await store.listCompletionColumns("jdbc-oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(getColumns).toHaveBeenCalledWith("jdbc-oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
   });
 
   it("uses the Dameng login schema for unqualified column completion", async () => {
@@ -1315,8 +1438,11 @@ describe("connectionStore completion assistant", () => {
     await store.listCompletionObjects("pg-1", "app", "Order", 20, undefined, undefined, false, undefined, ["sequence"]);
     await store.listCompletionObjects("pg-1", "app", "order", 20, "App", undefined, false, undefined, ["sequence"], true);
 
-    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
-      1,
+    // Each lookup issues a prefix search plus a widened substring search; the prefix
+    // requests carry the scoping and case sensitivity under test here.
+    const prefixRequests = completionAssistantSearch.mock.calls.map(([request]) => request as { match_mode?: string }).filter((request) => request.match_mode === "prefix");
+    expect(prefixRequests).toHaveLength(3);
+    expect(prefixRequests[0]).toEqual(
       expect.objectContaining({
         object_kinds: ["sequence"],
         mask: "Order",
@@ -1325,8 +1451,7 @@ describe("connectionStore completion assistant", () => {
         parent_schema: null,
       }),
     );
-    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
-      2,
+    expect(prefixRequests[1]).toEqual(
       expect.objectContaining({
         object_kinds: ["sequence"],
         mask: "Order",
@@ -1335,8 +1460,7 @@ describe("connectionStore completion assistant", () => {
         parent_schema: null,
       }),
     );
-    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
-      3,
+    expect(prefixRequests[2]).toEqual(
       expect.objectContaining({
         object_kinds: ["sequence"],
         mask: "order",

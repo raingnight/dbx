@@ -86,7 +86,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
-  const neededColumnWidths = computed(() => columns.value.map((_, colIdx) => neededColumnWidth(colIdx)));
+  const neededColumnWidths = computed(() => (columns.value ?? []).map((_, colIdx) => neededColumnWidth(colIdx)));
   const neededColumnWidthSignature = computed(() => neededColumnWidths.value.join("|"));
 
   /** Grow-only: late pages with larger keys must not stay stuck at a short-header / early-page width. */
@@ -123,9 +123,10 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const nextColumnIndexes = [...columnIndexes.value];
     const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
     if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
-    const currentNeededWidths = neededColumnWidths.value;
-    if (force || columnWidths.value.length !== columns.value.length || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
-      columnWidths.value = columns.value.map((_, colIdx) => {
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    const columnCount = columns.value?.length ?? 0;
+    if (force || columnWidths.value.length !== columnCount || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
+      columnWidths.value = (columns.value ?? []).map((_, colIdx) => {
         if (!force) {
           const existingWidth = previousWidthsByColumnIndex.get(nextColumnIndexes[colIdx]);
           if (existingWidth !== undefined) return existingWidth;
@@ -183,10 +184,13 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     document.addEventListener("mouseup", onUp);
   }
 
-  function autoFitColumn(colIdx: number) {
+  /** Full-content width of one visible column: unlike the default grow-only
+   *  sizing this ignores the density value truncation, so long text columns are
+   *  sized for what the cell actually shows. */
+  function autoFitColumnWidth(colIdx: number): number | undefined {
     const colName = columns.value[colIdx];
-    if (!colName) return;
-    columnWidths.value[colIdx] = calculateDataGridColumnWidth({
+    if (!colName) return undefined;
+    return calculateDataGridColumnWidth({
       columnName: colName,
       sampleValues: sampleColumnValues(colIdx),
       maxWidth: DATA_GRID_COL_AUTO_FIT_MAX_WIDTH,
@@ -197,7 +201,34 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       headerTextWidth: measureHeaderText?.(colName),
       hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
+  }
+
+  function autoFitColumn(colIdx: number) {
+    const width = autoFitColumnWidth(colIdx);
+    if (width === undefined) return;
+    columnWidths.value[colIdx] = width;
     markColumnUserSized(colIdx);
+    persistColumnWidths();
+  }
+
+  /** Fit every visible column to its content in one action (issue #9813), so a
+   *  wide table does not need one double-click per column. Manual drag keeps
+   *  working afterwards: the fitted columns are recorded as user-sized, which is
+   *  exactly the state a drag leaves behind. */
+  function autoFitAllColumns() {
+    if (columnWidths.value.length !== columns.value.length || columns.value.length === 0) return;
+    const next = columnWidths.value.slice();
+    let changed = false;
+    for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
+      const width = autoFitColumnWidth(colIdx);
+      if (width === undefined) continue;
+      markColumnUserSized(colIdx);
+      if (next[colIdx] !== width) {
+        next[colIdx] = width;
+        changed = true;
+      }
+    }
+    if (changed) columnWidths.value = next;
     persistColumnWidths();
   }
 
@@ -244,6 +275,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     growColumnWidthsToFitSamples,
     onResizeStart,
     autoFitColumn,
+    autoFitAllColumns,
     renderedColumnWidths,
     totalWidth,
     columnVars,

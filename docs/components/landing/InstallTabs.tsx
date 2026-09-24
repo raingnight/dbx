@@ -5,9 +5,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createInstallOptions, type InstallOption } from "@/lib/downloadLinks";
 import { detectPlatformId, type DownloadPlatformId } from "@/lib/platformDetection";
+import type { DocsLang } from "@/lib/i18n";
 
 type InstallTabsProps = {
-  lang: "en" | "cn";
+  lang: DocsLang;
   version: string;
 };
 
@@ -56,6 +57,21 @@ const browserStaticText = {
   },
 };
 
+const INSTALL_ARIA: Record<DocsLang, { moreOptions: string; options: string; guide: (label: string) => string; download: (label: string) => string }> = {
+  en: {
+    moreOptions: "Show other download options",
+    options: "Download options",
+    guide: (label) => `View installation guide for ${label}`,
+    download: (label) => `Download ${label}`,
+  },
+  cn: {
+    moreOptions: "显示其他下载选项",
+    options: "下载选项",
+    guide: (label) => `查看 ${label} 安装说明`,
+    download: (label) => `下载 ${label}`,
+  },
+};
+
 const platformIconPaths = {
   dark: {
     "linux-arm": "/icons/platform/linux.svg",
@@ -83,7 +99,7 @@ function PlatformIcon({ id, size, variant }: { id: string; size: number; variant
   return <img alt="" aria-hidden="true" height={size} src={src} width={size} />;
 }
 
-function BrowserStaticDialog({ lang, option, version, onClose }: { lang: "en" | "cn"; option: InstallOption; version: string; onClose: () => void }) {
+function BrowserStaticDialog({ lang, option, version, onClose }: { lang: DocsLang; option: InstallOption; version: string; onClose: () => void }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
   const text = browserStaticText[lang];
@@ -292,7 +308,7 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
             aria-controls="landing-install-menu"
             aria-expanded={open}
             aria-haspopup="menu"
-            aria-label={lang === "cn" ? "显示其他下载选项" : "Show other download options"}
+            aria-label={INSTALL_ARIA[lang].moreOptions}
             className="landing-install-toggle grid place-items-center border-0 border-l border-l-[rgba(10,11,13,0.12)] bg-transparent text-[#6a6f78] cursor-pointer"
             onClick={() => setOpen((current) => !current)}
           >
@@ -303,14 +319,14 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
           className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid max-h-[min(680px,calc(100vh-140px))] w-[min(410px,calc(100vw-32px))] overflow-y-auto overscroll-contain border border-[rgba(173,176,182,0.17)] rounded-xl py-1.5 max-[760px]:left-auto max-[760px]:translate-x-0"
           id="landing-install-menu"
           role="menu"
-          aria-label={lang === "cn" ? "下载选项" : "Download options"}
+          aria-label={INSTALL_ARIA[lang].options}
         >
           {menuOptions.map((item) => (
             <div className="landing-install-option relative grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-h-11 min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer" key={item.id} role="none">
               {item.action === "instructions" ? (
                 <button
                   type="button"
-                  aria-label={lang === "cn" ? `查看 ${item.label} 安装说明` : `View installation guide for ${item.label}`}
+                  aria-label={INSTALL_ARIA[lang].guide(item.label)}
                   className="landing-install-download-link absolute inset-0 border-0 bg-transparent cursor-pointer"
                   role="menuitem"
                   onClick={() => {
@@ -319,7 +335,7 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
                   }}
                 />
               ) : (
-                <a aria-label={lang === "cn" ? `下载 ${item.label}` : `Download ${item.label}`} className="landing-install-download-link absolute inset-0" href={item.href} role="menuitem" />
+                <a aria-label={INSTALL_ARIA[lang].download(item.label)} className="landing-install-download-link absolute inset-0" href={item.href} role="menuitem" />
               )}
               <PlatformIcon id={item.iconId} size={20} variant="light" />
               <span className="grid min-w-0 gap-1">

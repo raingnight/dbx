@@ -1,4 +1,6 @@
-export type InstallLang = "en" | "cn";
+import type { DocsLang } from "./i18n";
+
+export type InstallLang = DocsLang;
 export type BrowserStaticArch = "x64" | "arm64";
 
 export type BrowserStaticDownload = {

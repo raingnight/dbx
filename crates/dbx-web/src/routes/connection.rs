@@ -108,6 +108,15 @@ pub struct DisconnectRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PrewarmConnectionRequest {
+    pub connection_id: String,
+    pub database: Option<String>,
+    pub catalog: Option<String>,
+    pub client_session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloseDatabaseConnectionRequest {
     pub connection_id: String,
     pub database: String,
@@ -270,6 +279,18 @@ async fn run_temporary_connection_test(
 ) -> Result<ConnectionTestResult, String> {
     let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
     app.configs.write().await.insert(temp_id.clone(), config.clone());
+
+    if config.db_type == DatabaseType::Plugin {
+        let result = async {
+            let endpoint = app.plugin_connection_endpoint(&temp_id, &config).await?;
+            app.plugin_host.test_connection(&config, &endpoint.host, endpoint.port, endpoint.proxy).await
+        }
+        .await;
+        app.reset_connection_transport_for_config(&temp_id, &config).await;
+        app.configs.write().await.remove(&temp_id);
+        return result;
+    }
+
     let mut nacos_database_info = None;
 
     let pool_result = if config.db_type == DatabaseType::Nacos {
@@ -380,6 +401,11 @@ pub async fn connect_db(
     Json(body): Json<ConnectRequest>,
 ) -> Result<Json<String>, AppError> {
     let config = body.config;
+    // 演示模式：只允许连接已保存的连接，端点身份以存储为准，防止伪造 body
+    // 配置把服务器拨向任意主机（见 demo 模块）。
+    if state.demo_mode {
+        crate::demo::ensure_demo_connect_allowed(&state.app, &config).await.map_err(AppError::forbidden)?;
+    }
     if config.db_type == dbx_core::models::connection::DatabaseType::Sqlite {
         dbx_core::db::sqlite::validate_persistent_attachments(
             &config.host,
@@ -414,6 +440,40 @@ pub async fn connect_db(
     app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &runtime_config).await;
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
+
+    if config.db_type == dbx_core::models::connection::DatabaseType::Plugin {
+        let endpoint = match app.plugin_connection_endpoint(&connection_id, &config).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                app.reset_connection_transport_for_config(&connection_id, &config).await;
+                rollback_session_credential_writes(app, &session_credential_writes);
+                return Err(AppError::from(error));
+            }
+        };
+        if let Err(error) = app.ensure_current_connection_attempt(&connection_id, Some(attempt)).await {
+            app.reset_connection_transport_for_config(&connection_id, &config).await;
+            rollback_session_credential_writes(app, &session_credential_writes);
+            return Err(AppError::from(error));
+        }
+        let handle =
+            match app.plugin_host.connect_connection(&config, &endpoint.host, endpoint.port, endpoint.proxy).await {
+                Ok(handle) => handle,
+                Err(error) => {
+                    app.reset_connection_transport_for_config(&connection_id, &config).await;
+                    rollback_session_credential_writes(app, &session_credential_writes);
+                    return Err(AppError::from(error));
+                }
+            };
+        let pool = PoolKind::PluginConnection(handle);
+        if let Err(error) =
+            app.insert_connection_pool_for_attempt(&connection_id, attempt, connection_id.clone(), pool, &config).await
+        {
+            app.reset_connection_transport_for_config(&connection_id, &config).await;
+            rollback_session_credential_writes(app, &session_credential_writes);
+            return Err(AppError::from(error));
+        }
+        return Ok(Json(connection_id));
+    }
 
     if let Err(error) = app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await {
         // 连接失败：仅回滚本次请求刚写入的会话凭据，避免前端误判"已记住密码"而用
@@ -553,6 +613,21 @@ pub async fn check_connection_health(
     Json(body): Json<DisconnectRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.check_connection_health(&body.connection_id).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn prewarm_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<PrewarmConnectionRequest>,
+) -> Result<Json<()>, AppError> {
+    let database = body.database.as_deref().filter(|value| !value.is_empty());
+    let catalog = body.catalog.as_deref().filter(|value| !value.is_empty());
+    let client_session_id = body.client_session_id.as_deref().filter(|value| !value.is_empty());
+    state
+        .app
+        .prewarm_connection_pool(&body.connection_id, database, catalog, client_session_id)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -864,10 +939,15 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -889,6 +969,15 @@ mod tests {
             "auth": { "kind": "none" },
             "pinnedVersion": "3.1"
         }));
+        config
+    }
+
+    fn plugin_config(id: &str) -> ConnectionConfig {
+        let mut config = sqlite_config(id, "s3.amazonaws.com");
+        config.name = "S3".to_string();
+        config.db_type = DatabaseType::Plugin;
+        config.port = 443;
+        config.plugin_connection_type = Some("s3".to_string());
         config
     }
 
@@ -1035,6 +1124,36 @@ mod tests {
         assert_eq!(detailed.0.database_info, None);
         assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
         assert!(state.app.with_connection_pools(|pools| pools.keys().all(|key| !key.starts_with("__test_"))).await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_connection_test_uses_plugin_host_in_web_mode() {
+        let (state, dir) = test_web_state().await;
+        let config = plugin_config("plugin-test");
+
+        let error = run_temporary_connection_test(&state.app, config, false).await.unwrap_err();
+
+        assert_eq!(error, "Plugin connection is missing plugin_id");
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.with_connection_pools(|pools| pools.keys().all(|key| !key.starts_with("__test_"))).await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_connection_connect_uses_plugin_host_in_web_mode() {
+        let (state, dir) = test_web_state().await;
+        let config = plugin_config("plugin-connect");
+
+        let error =
+            connect_db(State(state.clone()), HeaderMap::new(), Json(ConnectRequest { config, client_attempt: None }))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error.message, "Plugin connection is missing plugin_id");
+        assert!(state.app.with_connection_pools(|pools| !pools.contains_key("plugin-connect")).await);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1424,7 +1543,7 @@ mod tests {
 
         let second = state.app.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
-        assert!(!state.app.pool_handle(&initial.id).await.is_some());
+        assert!(state.app.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1680,7 +1799,7 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(cached_admin_url, Some("http://127.0.0.1:8081"));
         drop(configs);
-        assert!(!state.app.pool_handle(&initial.id).await.is_some());
+        assert!(state.app.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1872,7 +1991,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle(&removed.id).await.is_some());
+        assert!(state.app.pool_handle(&removed.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1942,7 +2061,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle("conn").await.is_some());
+        assert!(state.app.pool_handle("conn").await.is_none());
         assert!(state.app.ensure_current_connection_attempt("conn", Some(current_attempt)).await.is_err());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -2000,7 +2119,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle(&config.id).await.is_some());
+        assert!(state.app.pool_handle(&config.id).await.is_none());
         let second = state.app.mq_registry.get_or_build(&config).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
 
